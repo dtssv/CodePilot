@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { buildProviderToolDefs, decideLazyMcp, listAdvertisedToolNames } from "../src/agent/agent-messages.js";
 import { makeMcpMetaTool, makeToolCatalogTool } from "../src/tools/mcp_tool.js";
-import { ToolRegistry, type ToolDef } from "../src/tools/types.js";
+import { ARTIFACT_THRESHOLD } from "../src/tools/_shared.js";
+import { ToolRegistry, type ToolDef, type ToolContext } from "../src/tools/types.js";
 
 function builtin(name: string): ToolDef {
   return {
@@ -294,11 +295,48 @@ describe("lazy MCP tool discovery", () => {
           { name: "mcp__feishu__missing" },
         ],
       } as never,
-      { cwd: "/" } as never,
+      { cwd: "/", artifact: async () => "art_unused" } as never,
     );
     expect(r.content).toContain("invoked mcp__feishu__a");
     expect(r.content).toContain("invoked mcp__feishu__b");
     expect(r.content).toContain("unknown MCP tool: mcp__feishu__missing");
     expect(r.isError).toBe(true); // one call failed
+  });
+
+  it("mcp batch spills oversized aggregated output to an artifact", async () => {
+    const reg = new ToolRegistry();
+    const big = "X".repeat(ARTIFACT_THRESHOLD);
+    reg.register({
+      name: "mcp__feishu__big",
+      description: "[mcp:feishu] big",
+      inputSchema: z.object({}),
+      permission: "network",
+      source: "mcp",
+      mcpMeta: { server: "feishu", toolName: "big", jsonSchema: { type: "object" } },
+      async execute() {
+        return { content: big };
+      },
+    });
+    const meta = makeMcpMetaTool(() => reg);
+    const store = new Map<string, string>();
+    const ctx = {
+      cwd: "/",
+      async artifact(blob: string | Uint8Array) {
+        const ref = "art_mcp_batch";
+        store.set(ref, String(blob));
+        return ref;
+      },
+      async readArtifact() {
+        return "";
+      },
+    } as unknown as ToolContext;
+
+    const r = await meta.execute(
+      { action: "batch", calls: [{ name: "mcp__feishu__big" }] } as never,
+      ctx,
+    );
+    expect(r.artifactRef).toBe("art_mcp_batch");
+    expect(r.content).toContain("chars omitted");
+    expect(store.get("art_mcp_batch")).toContain(big);
   });
 });

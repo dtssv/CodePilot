@@ -3,7 +3,6 @@
 // SPA over `file://` and connects via `?ws=&token=`.
 
 import { BrowserWindow, Menu, app, dialog, ipcMain, nativeTheme, shell } from "electron";
-import { spawn } from "node:child_process";
 import net from "node:net";
 import os from "node:os";
 import { createRequire } from "node:module";
@@ -17,6 +16,7 @@ import {
   clearServeInfo,
   type ServeInfo,
 } from "@codepilot/protocol/serve-info";
+import { spawnOrphanDaemon } from "@codepilot/protocol/engine-connect";
 import { parseReference } from "@codepilot/protocol/paths";
 
 import { findWebRoot, initialFolder, loadSettings, saveSettings } from "./settings.js";
@@ -98,37 +98,12 @@ function daemonLaunch(): { command: string; args: string[]; env: NodeJS.ProcessE
   };
 }
 
-/**
- * Spawn the shared daemon fully detached from Desktop's process group.
- * `detached: true` already calls setsid(2) on Unix via libuv — do not wrap
- * with the Linux-only `setsid` CLI (ENOENT on macOS).
- */
-function spawnSharedDaemon(
-  command: string,
-  args: string[],
-  opts: { cwd: string; env: NodeJS.ProcessEnv },
-): ReturnType<typeof spawn> {
-  const child = spawn(command, args, {
-    cwd: opts.cwd,
-    env: opts.env,
-    stdio: ["ignore", "ignore", "ignore"],
-    detached: true,
-    windowsHide: true,
-  });
-  try {
-    child.unref();
-  } catch {
-    /* ignore */
-  }
-  return child;
-}
-
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Prefer an already-running loopback daemon (the one the web client / IDE
- * plugins share); otherwise spawn one and wait for its lockfile. Detached so
- * closing the app does not kill a daemon other clients may still use.
+ * plugins share); otherwise orphan-spawn one and wait for its lockfile. The
+ * daemon is not a child of Electron (avoids quit "background process" prompts).
  */
 async function discoverOrStartDaemon(cwd: string): Promise<ServeInfo> {
   const existing = await readLiveServeInfo();
@@ -167,7 +142,7 @@ async function discoverOrStartDaemon(cwd: string): Promise<ServeInfo> {
   }
 
   const launch = daemonLaunch();
-  const child = spawnSharedDaemon(launch.command, launch.args, {
+  spawnOrphanDaemon(launch.command, launch.args, {
     cwd,
     env: launch.env,
   });
@@ -180,15 +155,10 @@ async function discoverOrStartDaemon(cwd: string): Promise<ServeInfo> {
   }
   // Last resort before giving up: a concurrent CodePilot (or a daemon we failed
   // to replace cleanly) may already hold the port and have published a valid
-  // serve.json. If our spawned child lost the port race and exited with
-  // EADDRINUSE, reusing that live daemon is correct — don't error out.
+  // serve.json. If our orphan lost the port race, reusing that live daemon is
+  // correct — don't error out.
   const raced = await readLiveServeInfo();
   if (raced && (await daemonHasGit(raced))) return raced;
-  try {
-    child.kill();
-  } catch {
-    /* ignore */
-  }
   throw new Error("the daemon did not publish ~/.codepilot/serve.json within 15s");
 }
 

@@ -11,9 +11,11 @@
  * normal mode (see lineEditor.ts).
  */
 import React from "react";
-import { Box, Text, useInput } from "ink";
+import { Box, Text, useInput, type DOMElement } from "ink";
 import { color as palette } from "./theme.js";
 import { isEscape } from "./keys.js";
+import { setCaretRegion, type CaretLocator } from "./caret.js";
+import { textWidth } from "./textWidth.js";
 import { editInExternalEditor } from "./externalEditor.js";
 import {
   deleteBackward,
@@ -138,6 +140,25 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
   const draftRef = React.useRef<string>("");
 
   const [menu, setMenu] = React.useState<Menu | null>(null);
+
+  /** The text block the caret lives in; its lay-out position anchors the cursor. */
+  const textRef = React.useRef<DOMElement | null>(null);
+  // Read through a ref so the attach callback can stay identity-stable while
+  // still seeing this render's cursor.
+  const caretLocateRef = React.useRef<CaretLocator>(() => null);
+  // Declared from the ref callback: it runs on every commit, before the frame
+  // is written, so the caret never parks on the previous frame's geometry.
+  const attachText = React.useCallback(
+    (node: DOMElement | null): void => {
+      textRef.current = node;
+      // Delegate through the ref: the attach callback runs once at mount, while
+      // the locator is rebuilt on every render to follow the cursor.
+      setCaretRegion(node, (width, height) => caretLocateRef.current(width, height));
+    },
+    [],
+  );
+  /** Cells the per-line prefix (`› `) takes before the text starts. */
+  const PREFIX_WIDTH = 2;
 
  // Auto-open the palette when the input starts with `/`. The fuzzy query is
  // the first whitespace-delimited token after the sigil; anything beyond
@@ -574,6 +595,34 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
   const lines = value.split("\n");
   const showPlaceholder = value.length === 0;
 
+  // Where the caret sits inside the text block, in cells relative to its
+  // top-left. The prefix and the line are one text run, so wrapping counts the
+  // prefix's cells too: a long line starts its continuation at the block's left
+  // edge, not after the prefix. The column therefore folds against the full
+  // width before it can be turned into a screen cell.
+  const caretLocate = React.useCallback(
+    (width: number): { line: number; col: number } | null => {
+      if (disabled) return null;
+      // The placeholder prints without the prompt prefix, so the caret sits at
+      // the block's left edge. This is the state while the first character of a
+      // composition is still uncommitted, so getting it right matters.
+      if (showPlaceholder) return { line: 0, col: 0 };
+      const avail = Math.max(1, width);
+      let rest = cursor;
+      for (let i = 0; i < lines.length; i++) {
+        const len = lines[i]!.length;
+        if (rest <= len || i === lines.length - 1) {
+          const used = PREFIX_WIDTH + textWidth(lines[i]!.slice(0, Math.max(0, rest)));
+          return { line: i + Math.floor(used / avail), col: used % avail };
+        }
+        rest -= len + 1;
+      }
+      return { line: lines.length - 1, col: PREFIX_WIDTH % avail };
+    },
+    [cursor, disabled, lines, showPlaceholder],
+  );
+  caretLocateRef.current = caretLocate;
+
   return (
     <Box flexDirection="column">
       {menu?.kind === "palette" && commands ? (
@@ -621,48 +670,53 @@ export function InputBox(props: InputBoxProps): React.ReactElement {
 
       <Box
         flexDirection="column"
-        borderStyle="round"
+        borderStyle="single"
+        borderTop={false}
+        borderLeft={false}
+        borderRight={false}
         borderColor={disabled ? palette.edge : palette.accent}
         paddingX={1}
       >
-        {showPlaceholder ? (
-          <Text dimColor>
-            {placeholder ??
-              "Type a message. / for commands, @ for files, Ctrl+R history."}
-          </Text>
-        ) : (
-          (() => {
-            let offset = 0;
-            return lines.map((line, i) => {
-              const start = offset;
-              offset += line.length + 1;
-              const col = cursor - start;
-              const here = !disabled && col >= 0 && col <= line.length;
-              return (
-                <Text key={`l-${i}`}>
-                  <Text color={palette.accent}>{i === 0 ? "› " : "  "}</Text>
-                  {here ? (
-                    <>
-                      {line.slice(0, col)}
-                      <Text inverse>{line[col] ?? " "}</Text>
-                      {line.slice(col + 1)}
-                    </>
-                  ) : line.length === 0 ? (
-                    " "
-                  ) : (
-                    line
-                  )}
-                </Text>
-              );
-            });
-          })()
-        )}
+        <Box ref={attachText} flexDirection="column">
+          {showPlaceholder ? (
+            <Text dimColor>
+              {placeholder ??
+                "Type a message. / for commands, @ for files, Ctrl+R history."}
+            </Text>
+          ) : (
+            (() => {
+              let offset = 0;
+              return lines.map((line, i) => {
+                const start = offset;
+                offset += line.length + 1;
+                const col = cursor - start;
+                const here = !disabled && col >= 0 && col <= line.length;
+                return (
+                  <Text key={`l-${i}`}>
+                    <Text color={palette.accent}>{i === 0 ? "› " : "  "}</Text>
+                    {here ? (
+                      <>
+                        {line.slice(0, col)}
+                        <Text inverse>{line[col] ?? " "}</Text>
+                        {line.slice(col + 1)}
+                      </>
+                    ) : line.length === 0 ? (
+                      " "
+                    ) : (
+                      line
+                    )}
+                  </Text>
+                );
+              });
+            })()
+          )}
+        </Box>
         <Box justifyContent="space-between">
           <Text dimColor>
             {vimMode ? (normal ? "-- NORMAL -- " : "-- INSERT -- ") : ""}
             {hint ??
               (busy
-                ? "↵ queue · ⌃↵ inject into run · ^C cancel"
+                ? "↵=queue · ⌃↵=insert into run · ^C cancel"
                 : "↵ send · ⇧↵ newline · ^K commands · ^R history · ^G editor · ^C cancel")}
           </Text>
         </Box>

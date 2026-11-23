@@ -38,6 +38,7 @@ export type ConfigHost = {
   events: Event[];
   lastProviderInputTokens: number;
   contextAnchor: { input: number; eventCount: number } | null;
+  foldedToolResultStubs: Map<string, string>;
   permissions: PermissionEngine;
   rebuildSystemPrompt(opts?: { scope?: "full" | "volatile" }): Promise<void>;
   persistEvent(e: Event): Promise<void>;
@@ -174,6 +175,7 @@ export async function setModel(
   // the previous measurement no longer anchors the estimate.
   host.lastProviderInputTokens = 0;
   host.contextAnchor = null;
+  host.foldedToolResultStubs.clear();
   applyHighRiskModelGate(host);
   await host.rebuildSystemPrompt();
   await emitModelEvent(host);
@@ -243,6 +245,7 @@ export async function setEndpoint(
   // anchors the estimate.
   host.lastProviderInputTokens = 0;
   host.contextAnchor = null;
+  host.foldedToolResultStubs.clear();
   applyHighRiskModelGate(host);
   await host.rebuildSystemPrompt();
   await emitModelEvent(host);

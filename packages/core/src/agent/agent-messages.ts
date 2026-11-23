@@ -10,8 +10,8 @@ import type {
   StreamChatOptions,
   StreamEvent,
 } from "../providers/types.js";
-import { ToolRegistry, type ToolContext, type ToolDef } from "../tools/types.js";
-import { zodToJsonSchema } from "../tools/types.js";
+import { ToolRegistry, type ToolDef } from "../tools/types.js";
+import { toProviderToolDef } from "../tools/schemaCache.js";
 import type {
   AgentDeps,
 } from "./agent-types.js";
@@ -22,7 +22,12 @@ import type {
 } from "../types.js";
 import { formatUploadNote } from "../workspace/promptFiles.js";
 import { filterToolsByMode, filterToolsByModel, type ToolExposureRule } from "../tools/modes.js";
-import { estimateEventTokens, foldToolResults, trimEventsToBudget } from "../compaction/compaction.js";
+import { isDirectWireTool } from "../tools/wirePolicy.js";
+import {
+  estimateEventTokens,
+  foldToolResults,
+  trimEventsToBudget,
+} from "../compaction/compaction.js";
 import { estimateTokens } from "../compaction/tokens.js";
 
 // ---------------------------------------------------------------------------
@@ -46,19 +51,16 @@ export function decideLazyMcp(
   return mcpToolCount > (lazyThreshold ?? 2);
 }
 
-/** Build the provider-facing tool definitions for a turn, filtered by mode and
- * optional per-model exposure downgrade. `lazyMcp` drops individual MCP tools
- * (reached via the `mcp` meta-tool) to keep the tool schema small. */
+/** Provider-facing tool definitions for a turn (mode + exposure filtered).
+ * With `previouslyAdvertised` the wire set is session-monotonic: names already
+ * sent stay even if mode/lazy would drop them (execute-time deny still
+ * enforces mode). Stable order: builtin → plugin → mcp, then name. */
 export function buildProviderToolDefs(
   tools: ToolRegistry,
   mode: AgentMode,
   opts: TurnToolFilterOptions = {},
 ): ProviderToolDef[] {
-  return filterToolsForTurn(tools, mode, opts).map((t) => ({
-    name: t.name,
-    description: t.description,
-    inputSchema: zodToJsonSchema(t.inputSchema),
-  }));
+  return selectToolsForTurn(tools, mode, opts).map(toProviderToolDef);
 }
 
 /** Options for the per-turn tool filter chain. `lazyMcp` / `lazyPlugin` hide
@@ -69,27 +71,70 @@ export interface TurnToolFilterOptions {
   lazyPlugin?: boolean;
   model?: string;
   toolExposure?: ToolExposureRule[];
+  /** Names already advertised this session; re-included so mode/lazy flips
+   * never shrink the tools prefix. Under `deferredWire` only direct-allowlist
+   * names may sticky. */
+  previouslyAdvertised?: ReadonlySet<string>;
+  /** Keep only the direct-wire allowlist on `tools[]`; deferred tools are
+   * reached via `code_mode.tools.*`. */
+  deferredWire?: boolean;
 }
 
-/** The filter chain that decides which tools ride a turn: mode → lazy MCP →
- * lazy plugin → per-model `toolExposure` downgrade. Shared so the provider tool
- * table and its mirrors (system-prompt ad, `/context` row) stay in sync. */
-function filterToolsForTurn(
+/** Source rank for contiguous cache prefix: builtins first. */
+function sourceRank(source: ToolDef["source"]): number {
+  if (source === "plugin") return 1;
+  if (source === "mcp") return 2;
+  return 0; // builtin / undefined
+}
+
+/** Stable sort: builtin → plugin → mcp, then name. */
+export function sortToolsForCache(tools: readonly ToolDef[]): ToolDef[] {
+  return tools.slice().sort((a, b) => {
+    const d = sourceRank(a.source) - sourceRank(b.source);
+    if (d !== 0) return d;
+    return a.name.localeCompare(b.name);
+  });
+}
+
+/** Mode → lazy → exposure → deferred-wire allowlist → session-monotonic union
+ * (direct-only when `deferredWire`) → stable sort. */
+export function selectToolsForTurn(
   tools: ToolRegistry,
   mode: AgentMode,
-  opts: TurnToolFilterOptions,
+  opts: TurnToolFilterOptions = {},
 ): ToolDef[] {
   let visible = filterToolsByMode(tools.all(), mode);
-  if (opts.lazyMcp) {
+  // deferredWire implies MCP/plugin schemas never ride the wire (even if
+  // discovery is "eager"); otherwise honour explicit lazy flags.
+  if (opts.deferredWire || opts.lazyMcp) {
     visible = visible.filter((t) => t.source !== "mcp");
   }
-  if (opts.lazyPlugin) {
+  if (opts.deferredWire || opts.lazyPlugin) {
     visible = visible.filter((t) => t.source !== "plugin");
   }
   if (opts.model && opts.toolExposure && opts.toolExposure.length > 0) {
     visible = filterToolsByModel(visible, opts.model, opts.toolExposure);
   }
-  return visible;
+  if (opts.deferredWire) {
+    visible = visible.filter(isDirectWireTool);
+  }
+
+  const prev = opts.previouslyAdvertised;
+  if (prev && prev.size > 0) {
+    const byName = new Map(visible.map((t) => [t.name, t]));
+    for (const name of prev) {
+      if (byName.has(name)) continue;
+      // Never sticky-advertise deferred tools under deferredWire.
+      if (opts.deferredWire && !isDirectWireTool(name)) continue;
+      const kept = tools.get(name);
+      if (!kept) continue;
+      if (opts.deferredWire && !isDirectWireTool(kept)) continue;
+      byName.set(name, kept);
+    }
+    visible = [...byName.values()];
+  }
+
+  return sortToolsForCache(visible);
 }
 
 /** Names the model is told it can call this turn — the same filter chain as
@@ -99,7 +144,15 @@ export function listAdvertisedToolNames(
   mode: AgentMode,
   opts: TurnToolFilterOptions = {},
 ): string[] {
-  return filterToolsForTurn(tools, mode, opts).map((t) => t.name);
+  return selectToolsForTurn(tools, mode, opts).map((t) => t.name);
+}
+
+/** Record the final wire names into a session set (monotonic growth). */
+export function rememberAdvertisedToolNames(
+  advertised: Set<string>,
+  names: readonly string[],
+): void {
+  for (const n of names) advertised.add(n);
 }
 
 // ---------------------------------------------------------------------------
@@ -124,6 +177,11 @@ export function buildProviderMessages(
  /** Rolling tool-output window: fold old tool_results down to this many
  * before any budget pressure. */
     maxUnfoldedToolResults?: number;
+ /** Freeze map so a folded toolCallId keeps the same stub across turns. */
+    stubMemo?: Map<string, string>;
+ /** Default path: size-fold large old results with a fixed keep window (no
+  * rolling count, no soft escalate). */
+    stableSizeFold?: boolean;
  /** Invoked when micro-compaction folds ≥1 tool_result (observability). */
     onFolded?: (foldedCount: number) => void;
  /** Drop every inline image from the send view. Used by the payload-too-large
@@ -137,6 +195,8 @@ export function buildProviderMessages(
     opts.contextBudget,
     opts.hardBudget,
     opts.maxUnfoldedToolResults,
+    opts.stubMemo,
+    opts.stableSizeFold === true,
   );
   if (foldedCount > 0) {
     try {
@@ -170,16 +230,18 @@ function stripEventImages(e: Event): Event {
 }
 
 /**
- * Optionally fold old tool results (soft budget / rolling window), then
- * hard-trim to the model window. Soft passes are skipped when neither
- * `softBudget` nor `maxUnfoldedToolResults` is set so the send view stays
- * append-only and the prompt-cache prefix survives across turns.
+ * Optional mid-history fold (soft budget / rolling window / size-fold), then
+ * hard-trim to the model window. Folds are opt-in: each rewrites already-sent
+ * tool_result bodies and invalidates the cached prefix from that point, so the
+ * default path prefers first-write spill + summary compaction.
  */
 function foldForBudget(
   events: Event[],
   softBudget: number | undefined,
   hardBudget?: number,
   maxUnfoldedToolResults?: number,
+  stubMemo?: Map<string, string>,
+  stableSizeFold = false,
 ): { events: Event[]; foldedCount: number } {
   let out = events;
   let totalFolded = 0;
@@ -189,18 +251,16 @@ function foldForBudget(
       ? maxUnfoldedToolResults
       : undefined;
 
-  // Mid-history rewrite only when the operator opted into soft fold or a
-  // rolling tool-result window. Unconditional size-fold here used to run
-  // every turn and permanently capped cache hits well below 95%.
-  if (soft !== undefined || rolling !== undefined) {
+  if (soft !== undefined || rolling !== undefined || stableSizeFold) {
     const first = foldToolResults(events, {
       keepRecentMessages: 8,
       ...(rolling !== undefined ? { maxUnfoldedToolResults: rolling } : {}),
-      // When only the rolling window is set, skip size-based folds so we
-      // only collapse by count; soft budget still uses the default minChars.
-      ...(soft === undefined && rolling !== undefined
+      // Rolling-only: skip size gate (count pressure alone). Soft / stable
+      // size-fold use the default minChars (~1200).
+      ...(soft === undefined && rolling !== undefined && !stableSizeFold
         ? { minChars: Number.POSITIVE_INFINITY }
         : {}),
+      ...(stubMemo ? { stubMemo } : {}),
     });
     out = first.events;
     totalFolded = first.foldedCount;
@@ -208,7 +268,11 @@ function foldForBudget(
   if (soft) {
     for (const keep of [6, 4, 2]) {
       if (estimateEventTokens(out, estimateTokens) < soft * 0.75) break;
-      const next = foldToolResults(out, { keepRecentMessages: keep, minChars: 160 });
+      const next = foldToolResults(out, {
+        keepRecentMessages: keep,
+        minChars: 160,
+        ...(stubMemo ? { stubMemo } : {}),
+      });
       totalFolded += next.foldedCount;
       out = next.events;
     }
@@ -335,6 +399,9 @@ export function compactTranscriptToProviderMessages(
     if (emittedCalls.has(id)) return null;
     emittedCalls.add(id);
     open.push(id);
+    // Send the sealed tool_use input verbatim. Oversized args are bounded
+    // once at seal time (runAgent); re-truncating here rewrites mid-history
+    // relative to a previously cached full body and busts prefix cache.
     return { type: "tool_use", id, name, input };
   };
 
@@ -455,6 +522,13 @@ export async function* streamOnce(
     toolChoice?: StreamChatOptions["toolChoice"];
  /** Per-request mid-stream steer signal (see AgentDeps.getSteerSignal). */
     steerSignal?: AbortSignal;
+ /**
+  * Tool-lock / wrap-up instruction. Appended as a trailing
+  * `user` message AFTER `<runtime_context>` so system + tools + history keep a
+  * byte-stable cached prefix; only this suffix (and `toolChoice:"none"`) change.
+  * Not persisted to the event log.
+  */
+    trailingUser?: string;
   } = {},
 ): AsyncIterable<StreamEvent> {
   const sys = deps.systemPrompt;
@@ -492,14 +566,25 @@ export async function* streamOnce(
   //   1) OpenAI/GLM never see a split tool pair (invalid_argument);
   //   2) implicit prefix caches keep hitting on the whole history — only this
   //      trailing note changes between turns.
-  // OpenAI adapters demote a non-leading `system` to `user` and may merge it
-  // with an adjacent user turn; Anthropic skips it for cache breakpoints.
+  // OpenAI keeps demoted runtime as its own trailing user (no merge into the
+  // prior turn). Anthropic peels `<runtime_context>` into an uncached system
+  // tail so it never rewrites the preceding tool_results user message.
   let effectiveMessages = messages;
   const dynamicSuffix = perTurn;
   if (dynamicSuffix && dynamicSuffix.trim().length > 0) {
     const note = `<runtime_context>\n${dynamicSuffix}\n</runtime_context>`;
     const contextMsg: ProviderMessage = { role: "system", content: [{ type: "text", text: note }] };
     effectiveMessages = messages.length > 0 ? [...messages, contextMsg] : [contextMsg];
+  }
+  // Wrap-up / tool-lock directive rides a trailing user turn — never folded
+  // into runtime_context — so locking tools does not rewrite the cached
+  // conversation prefix.
+  const trailing = extra.trailingUser?.trim();
+  if (trailing) {
+    effectiveMessages = [
+      ...effectiveMessages,
+      { role: "user", content: [{ type: "text", text: trailing }] },
+    ];
   }
   void messageId;
   // Either a user Stop (`deps.signal`) or a mid-stream steer (`deps.steerSignal`)

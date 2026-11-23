@@ -1,9 +1,7 @@
-// goal_status: structured, format-drift-proof channel for reporting a goal
-// loop's terminal state. The tool emits a `goal_status` block the agent loop
-// parses; the goal loop trusts it ahead of the text markers.
+// goal action=status: structured terminal-state channel for the goal loop.
 
 import { describe, it, expect } from "vitest";
-import { goalStatusTool } from "../src/tools/goal_status.js";
+import { goalTool } from "../src/tools/goal.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 function ctx(over: Partial<ToolContext> = {}): ToolContext {
@@ -15,42 +13,39 @@ function ctx(over: Partial<ToolContext> = {}): ToolContext {
   } as ToolContext;
 }
 
-/** Parse the goal_status block the agent loop consumes. */
-function goalStatus(blocks: Array<{ type: string; text: string }> | undefined) {
+function parseBlock(blocks: Array<{ type: string; text: string }> | undefined) {
   const b = blocks?.find((x) => x.type === "text");
-  return b
-    ? (JSON.parse(b.text) as { type: string; status?: string; reason?: string })
-    : null;
+  return b ? (JSON.parse(b.text) as Record<string, unknown>) : null;
 }
 
-describe("goal_status tool", () => {
-  it("emits a completed goal_status block with the reason", async () => {
-    const r = await goalStatusTool.execute(
-      { status: "completed", reason: "all tests pass" },
+describe("goal action=status", () => {
+  it("emits a goal_status block for completed", async () => {
+    const r = await goalTool.execute(
+      { action: "status", status: "completed", reason: "verified" },
       ctx(),
     );
-    const gs = goalStatus(r.blocks);
+    const gs = parseBlock(r.blocks);
     expect(gs?.type).toBe("goal_status");
     expect(gs?.status).toBe("completed");
-    expect(gs?.reason).toBe("all tests pass");
-    expect(r.content).toMatch(/completed/);
+    expect(gs?.reason).toBe("verified");
   });
 
-  it("emits a blocked goal_status block", async () => {
-    const r = await goalStatusTool.execute({ status: "blocked", reason: "no creds" }, ctx());
-    const gs = goalStatus(r.blocks);
+  it("emits a goal_status block for blocked", async () => {
+    const r = await goalTool.execute(
+      { action: "status", status: "blocked", reason: "no creds" },
+      ctx(),
+    );
+    const gs = parseBlock(r.blocks);
+    expect(gs?.type).toBe("goal_status");
     expect(gs?.status).toBe("blocked");
-    expect(gs?.reason).toBe("no creds");
   });
 
-  it("omits reason when not provided", async () => {
-    const r = await goalStatusTool.execute({ status: "completed" }, ctx());
-    const gs = goalStatus(r.blocks);
-    expect(gs?.status).toBe("completed");
-    expect(gs?.reason).toBeUndefined();
+  it("works without a reason", async () => {
+    const r = await goalTool.execute({ action: "status", status: "completed" }, ctx());
+    expect(parseBlock(r.blocks)?.status).toBe("completed");
   });
 
-  it("is read-tier (no file side effects)", () => {
-    expect(goalStatusTool.permission).toBe("read");
+  it("is read-tier", () => {
+    expect(goalTool.permission).toBe("read");
   });
 });

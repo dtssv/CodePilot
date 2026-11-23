@@ -211,6 +211,29 @@ function safeJson(v: unknown): string {
   }
 }
 
+/** The REPL's own command set — this surface runs the headless engine without
+ * pickers, so it lists only what the switch below actually dispatches. */
+export function headlessHelpText(): string {
+  return [
+    "Commands — optional arguments are shown in [ ].",
+    "",
+    "  /model                    list selectable models for this provider",
+    "  /model <name>             switch model on the current provider",
+    "  /model <provider>/<model> switch model, any configured provider",
+    "  /provider <id>            switch provider preset",
+    "  /mode <chat|plan|agent>   set collaboration mode",
+    "       chat   read-only Q&A; no edits, no shell",
+    "       plan   read-only, then the model produces a plan",
+    "       agent  full autonomy (default)",
+    "  /clear                    clear the screen (transcript is kept)",
+    "  /help                     show this help (also /?)",
+    "  /exit                     exit (also /quit, Ctrl+D)",
+    "",
+    "Anything not starting with / is sent to the model as a prompt.",
+    "",
+  ].join("\n");
+}
+
 /**
  * Tracks the last assistant message text. Used to print the final answer on
  * success and as the basis for `--json` consumers that only want the result.
@@ -656,17 +679,8 @@ export async function cmdRepl(
             rl.close();
             return;
           case "help":
-            stderr_.write(
-              "Commands:\n" +
-                "  /mode <chat|plan|agent>   set collaboration mode\n" +
-                "  /model                    list selectable models\n" +
-                "  /model <provider>/<model> switch model (any configured provider)\n" +
-                "  /model <name>             switch model on current provider\n" +
-                "  /provider <id>            switch provider preset\n" +
-                "  /clear                    clear the screen\n" +
-                "  /help                     show this help\n" +
-                "  /exit                     exit (also Ctrl+D)\n",
-            );
+          case "?":
+            stderr_.write(headlessHelpText());
             break;
           case "mode": {
             const m = arg as AgentMode;

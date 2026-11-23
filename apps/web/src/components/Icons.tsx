@@ -432,6 +432,17 @@ export function DotIcon({ className }: IconProps): React.ReactElement {
   );
 }
 
+/** Horizontal ellipsis for overflow / “More” menus. */
+export function MoreHorizontalIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true" className={className ?? "h-3.5 w-3.5"} fill="currentColor">
+      <circle cx="3.5" cy="8" r="1.25" />
+      <circle cx="8" cy="8" r="1.25" />
+      <circle cx="12.5" cy="8" r="1.25" />
+    </svg>
+  );
+}
+
 /** Spinning state mark for a tool that has not returned yet. */
 export function SpinnerIcon({ className }: IconProps): React.ReactElement {
   return (

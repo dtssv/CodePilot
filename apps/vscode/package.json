@@ -15,7 +15,7 @@
   "icon": "media/icon-128.png",
   "main": "./dist/extension.cjs",
   "engines": {
-    "vscode": "^1.90.0",
+    "vscode": "^1.106.0",
     "node": ">=20"
   },
   "activationEvents": [
@@ -103,12 +103,31 @@
         "command": "codepilot.switchWorkspace",
         "title": "%codepilot.command.switchWorkspace.title%",
         "category": "CodePilot"
+      },
+      {
+        "command": "codepilot.dockHere",
+        "title": "%codepilot.command.dockHere.title%",
+        "category": "CodePilot"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
           "id": "codepilot",
+          "title": "%codepilot.viewsContainers.codepilot.title%",
+          "icon": "media/icon.svg"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "codepilot-right",
+          "title": "%codepilot.viewsContainers.codepilot.title%",
+          "icon": "media/icon.svg"
+        }
+      ],
+      "panel": [
+        {
+          "id": "codepilot-panel",
           "title": "%codepilot.viewsContainers.codepilot.title%",
           "icon": "media/icon.svg"
         }
@@ -120,13 +139,61 @@
           "type": "webview",
           "id": "codepilot.chatView",
           "name": "%codepilot.views.chat.name%",
-          "contextualTitle": "CodePilot"
+          "contextualTitle": "CodePilot",
+          "when": "codepilot.panelPosition == 'left'"
+        },
+        {
+          "id": "codepilot.dock",
+          "name": "%codepilot.views.dock.name%",
+          "contextualTitle": "CodePilot",
+          "when": "codepilot.panelPosition != 'left'"
+        }
+      ],
+      "codepilot-right": [
+        {
+          "type": "webview",
+          "id": "codepilot.chatView.right",
+          "name": "%codepilot.views.chat.name%",
+          "contextualTitle": "CodePilot",
+          "when": "codepilot.panelPosition == 'right'"
+        }
+      ],
+      "codepilot-panel": [
+        {
+          "type": "webview",
+          "id": "codepilot.chatView.panel",
+          "name": "%codepilot.views.chat.name%",
+          "contextualTitle": "CodePilot",
+          "when": "codepilot.panelPosition == 'bottom' || codepilot.panelPosition == 'top'"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "codepilot.dock",
+        "contents": "%codepilot.viewsWelcome.dock%"
+      }
+    ],
     "configuration": {
       "title": "CodePilot",
       "properties": {
+        "codepilot.panelPosition": {
+          "type": "string",
+          "enum": [
+            "left",
+            "right",
+            "bottom",
+            "top"
+          ],
+          "default": "left",
+          "enumDescriptions": [
+            "%codepilot.config.panelPosition.left%",
+            "%codepilot.config.panelPosition.right%",
+            "%codepilot.config.panelPosition.bottom%",
+            "%codepilot.config.panelPosition.top%"
+          ],
+          "description": "%codepilot.config.panelPosition%"
+        },
         "codepilot.serverPath": {
           "type": "string",
           "default": "codepilot",
@@ -262,18 +329,38 @@
       "editor/context": [
         {
           "command": "codepilot.addToChat",
-          "when": "editorHasSelection",
           "group": "codepilot@1"
         },
         {
           "command": "codepilot.addToNewChat",
-          "when": "editorHasSelection",
           "group": "codepilot@2"
         },
         {
           "command": "codepilot.askSelection",
           "when": "editorHasSelection",
           "group": "codepilot@3"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "codepilot.addToChat",
+          "when": "!explorerResourceIsFolder",
+          "group": "codepilot@1"
+        },
+        {
+          "command": "codepilot.addToNewChat",
+          "when": "!explorerResourceIsFolder",
+          "group": "codepilot@2"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "codepilot.addToChat",
+          "group": "codepilot@1"
+        },
+        {
+          "command": "codepilot.addToNewChat",
+          "group": "codepilot@2"
         }
       ]
     }
@@ -290,9 +377,10 @@
     "ws": "^8.21.3"
   },
   "devDependencies": {
+    "@codepilot/protocol": "workspace:*",
     "@codepilot/web": "workspace:*",
     "@types/node": "^22.10.0",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "^1.106.0",
     "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^2.1.8",
     "@vscode/vsce": "^3.2.1",

@@ -9,7 +9,10 @@ import { runOneTool, type ToolExecResult } from "./agent-tools.js";
 import { DoomLoopDetector } from "./doomLoop.js";
 import { filterToolNames } from "../tools/modes.js";
 import { redactSecrets } from "../permissions/redact.js";
+import { createLogger } from "../telemetry/logger.js";
 import type { AgentMode, DoomLoopConfig, Event, ToolUseBlock } from "../types.js";
+
+const log = createLogger("runtime");
 
 /** Lifecycle state of a runtime instance. */
 export type AgentRuntimeState = "idle" | "running" | "waiting_permission";
@@ -327,25 +330,40 @@ export class RuntimeRegistry {
 
  /**
  * Resolve a runtime by name, falling back to default when `name` is
- * undefined. Throws for an unknown explicit name (no silent degrade to
- * the default loop).
+ * undefined. Unknown names still throw. A registered factory whose
+ * `create()` throws falls back to the default loop (fail-soft) so a
+ * broken plugin cannot brick every prompt on the session.
  */
   resolve(name: string | undefined, opts: RuntimeResolveOptions): AgentRuntime {
     const effective = name ?? DEFAULT_RUNTIME_NAME;
+    return this.createFromFactory(effective, opts, /*allowDefaultFallback*/ true);
+  }
+
+  private createFromFactory(
+    effective: string,
+    opts: RuntimeResolveOptions,
+    allowDefaultFallback: boolean,
+  ): AgentRuntime {
     const factory = this.factories.get(effective);
     if (!factory) {
       throw new Error(`Unknown agent runtime: "${effective}" (registered: ${this.list().join(", ")})`);
     }
-    return factory.create({
-      cwd: opts.cwd,
-      toolkit:
-        opts.toolkit ??
-        createRuntimeToolkit({
-          registerTool: opts.registerTool,
-          setContextTransform: opts.setContextTransform,
-          registerEventSink: opts.registerEventSink,
-        }),
-    });
+    const toolkit =
+      opts.toolkit ??
+      createRuntimeToolkit({
+        registerTool: opts.registerTool,
+        setContextTransform: opts.setContextTransform,
+        registerEventSink: opts.registerEventSink,
+      });
+    try {
+      return factory.create({ cwd: opts.cwd, toolkit });
+    } catch (err) {
+      if (!allowDefaultFallback || effective === DEFAULT_RUNTIME_NAME) throw err;
+      log.warn(
+        `runtime "${effective}" create() failed — ${(err as Error).message}; falling back to "${DEFAULT_RUNTIME_NAME}"`,
+      );
+      return this.createFromFactory(DEFAULT_RUNTIME_NAME, opts, false);
+    }
   }
 }
 

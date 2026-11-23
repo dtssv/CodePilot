@@ -189,6 +189,11 @@ export interface InstallOptions {
   * install-consent time. Defaults to the shared `~/.codepilot/plugins/.trust.json`
   * store; override for tests. */
   trustStore?: PluginTrustStore;
+  /**
+   * Explicit user/host consent to install and record a trust fingerprint.
+   * Required (`true`); callers must confirm after {@link inspectPluginSource}.
+   */
+  consent?: boolean;
 }
 
 export interface PluginRuntimeLoadResult {

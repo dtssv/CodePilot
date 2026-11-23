@@ -11,7 +11,7 @@
  * - Handle Ctrl+C: cancel running prompt or exit.
  */
 import React from "react";
-import { Box, Static, Text, measureElement, useInput, useStdout, type DOMElement } from "ink";
+import { Box, Text, measureElement, useInput, useStdout, type DOMElement } from "ink";
 import {
   type AgentMode,
   type Event,
@@ -22,11 +22,18 @@ import {
   type SlashCommand,
   killAllJobs,
   discoverSlashCommands,
+  listMcpPromptSlashCommands,
   sameCwd,
   driveGoalRounds,
   type RichSessionSummary,
 } from "@codepilot/core";
-import { TranscriptItem, isVisibleRow } from "../TranscriptView.js";
+import { WelcomeBanner } from "../TranscriptView.js";
+import { TranscriptViewport, entryAtScreenY, viewportLayout } from "../TranscriptViewport.js";
+import { initialInteraction, interactionReducer } from "../interaction.js";
+import { onTermMouse, type TermMouseEvent } from "../mouse.js";
+import { isEscape } from "../keys.js";
+import { AgentDialog, dialogWindow } from "./AgentDialog.js";
+import { buildTranscriptEntries, lastFocusable, nextFocusable, runsForKey, scrollToShow } from "./entries.js";
 import { ToolViewer } from "../ToolViewer.js";
 import { onCapturedStderr } from "../../stderrCapture.js";
 import { InputBox } from "../InputBox.js";
@@ -36,25 +43,18 @@ import { ConnectWizard } from "../ConnectWizard.js";
 import { SetupWizard } from "../SetupWizard.js";
 import { ModelPicker } from "../ModelPicker.js";
 import { SelectMenu, TextPrompt, type SelectOption } from "../SelectMenu.js";
+import { HelpPanel } from "../HelpPanel.js";
 import { StatusBar } from "../StatusBar.js";
 import { Spinner } from "../Spinner.js";
-import { initialState, nextAgentMode, reducer, rowKeys, settledCount, type Row } from "../state.js";
+import { initialState, nextAgentMode, reducer, rowKeys, settledCount } from "../state.js";
 import { color, glyph, shortPath, setTheme } from "../theme.js";
 import { THEME_LABELS, loadThemePref, saveThemePref, type ThemeName } from "../themes.js";
 import { loadEditorMode, saveEditorMode, type EditorMode } from "../editorMode.js";
 import { buildCommandList, BUILTIN_COMMAND_NAMES } from "../commands.js";
+import { VERSION } from "../../version.js";
 import type { GoalBridge, PermissionBridge, QuestionBridge, SessionController } from "../controller.js";
-import {
-  activityLabel,
-  clipNotice,
-  connectionLabel,
-  estimateRowHeight,
-  CLEAR_ALL,
-  type ConnectionInfo,
-  type PrintedItem,
-} from "./helpers.js";
+import { activityLabel, clipNotice, connectionLabel, type ConnectionInfo } from "./helpers.js";
 import { executeSlashCommand } from "./commandHandlers.js";
-import { renderPrintedItem } from "./render.js";
 import type { AppProps } from "./types.js";
 
 export type { AppProps, ConnectionInfo } from "./types.js";
@@ -174,6 +174,8 @@ export function App(props: AppProps): React.ReactElement {
   const [showConnect, setShowConnect] = React.useState(false);
   const [showSetup, setShowSetup] = React.useState(false);
   const [showModelPicker, setShowModelPicker] = React.useState(false);
+  /** Full-screen help panel (/help). Rendered instead of the chat view. */
+  const [showHelp, setShowHelp] = React.useState(false);
   const [modelPickerRows, setModelPickerRows] = React.useState<
     import("@codepilot/core").SelectableModel[]
   >([]);
@@ -282,12 +284,22 @@ export function App(props: AppProps): React.ReactElement {
     }
   }, [session]);
 
- // The merged autocomplete list (built-ins + custom). Memoised so InputBox
- // doesn't re-render on every keystroke.
-  const commandList = React.useMemo(
-    () => buildCommandList(customCommands),
+ // Merged custom + live MCP prompt slash commands. MCP side is read live each
+ // render so prompts/list_changed (manager cache refresh) shows up without a
+ // separate invalidation channel; listAllPrompts is in-memory and cheap.
+  const takenCustomNames = React.useMemo(
+    () => new Set(customCommands.map((c) => c.name.toLowerCase())),
     [customCommands],
   );
+  const allCustomCommands = [
+    ...customCommands,
+    ...listMcpPromptSlashCommands(session.getMcpManager(), {
+      takenNames: takenCustomNames,
+    }),
+  ];
+
+ // Built-ins + custom markdown + live MCP prompts for the `/` autocomplete.
+  const commandList = buildCommandList(allCustomCommands);
 
  // 1. Subscribe to session events. `subscribe` replays the history first
  // (core Session, RemoteSession and the mock all do), which seeds the
@@ -317,6 +329,7 @@ export function App(props: AppProps): React.ReactElement {
           toolName: req.toolName,
           input: req.input,
           reason: req.reason,
+          ...(req.preview ? { preview: req.preview } : {}),
         },
       });
     });
@@ -478,7 +491,7 @@ export function App(props: AppProps): React.ReactElement {
           mode === "chat"
             ? "safe read tools"
             : mode === "plan"
-              ? "read tools + plan_update"
+              ? "read tools + plan"
               : "all tools"
         } are exposed to the model)`,
       });
@@ -667,11 +680,15 @@ export function App(props: AppProps): React.ReactElement {
  // 3. Submit handler.
   const doSubmit = React.useCallback(
     async (text: string, delivery: "auto" | "steer" = "auto") => {
+      const taken = new Set(customCommands.map((c) => c.name.toLowerCase()));
       const slash = await executeSlashCommand(text, {
         session,
         controller,
         cwd,
-        customCommands,
+        customCommands: [
+          ...customCommands,
+          ...listMcpPromptSlashCommands(session.getMcpManager(), { takenNames: taken }),
+        ],
         state: {
           permissionMode: state.permissionMode,
           agentMode: state.agentMode,
@@ -687,6 +704,7 @@ export function App(props: AppProps): React.ReactElement {
         setShowSetup,
         setModelPickerRows,
         setShowModelPicker,
+        setShowHelp,
         setSelectOverlay,
         setTextOverlay,
         setHistoryEpoch,
@@ -719,7 +737,7 @@ export function App(props: AppProps): React.ReactElement {
           };
           if (typeof s.steer === "function") s.steer(text);
           else await s.prompt(text, undefined, "steer");
-          dispatch({ type: "set-notice", text: "Injected into the current run." });
+          dispatch({ type: "set-notice", text: "Will apply after the current step." });
           return;
         }
         if (state.busy) {
@@ -835,44 +853,47 @@ export function App(props: AppProps): React.ReactElement {
   const pendingQuestion = state.question;
 
  // ---------------------------------------------------------------------------
- // Rendering model. Finished rows are printed ONCE into the terminal's own
- // scrollback via <Static> (so the native scrollbar / mouse wheel / search
- // work and nothing is ever drawn twice). Only rows still changing live in
- // the redrawn region, which is kept strictly shorter than the terminal:
- // Ink clears the screen and reprints all output whenever its dynamic frame
- // reaches the terminal height.
+ // Rendering model. The transcript lives in our own scrolling viewport: rows
+ // stay mounted so they can open and close, take focus, and receive clicks. The
+ // whole frame is kept shorter than the terminal so Ink never has to wipe and
+ // reprint it, which is what made the old <Static> transcript immutable.
  // ---------------------------------------------------------------------------
   const { stdout } = useStdout();
   const [size, setSize] = React.useState({ cols: stdout.columns || 80, rows: stdout.rows || 24 });
-  const [epoch, setEpoch] = React.useState(0);
   const [viewerOpen, setViewerOpen] = React.useState(false);
-  const printedRef = React.useRef<{ epoch: number; keys: Set<string>; items: PrintedItem[] }>({
-    epoch: -1,
-    keys: new Set(),
-    items: [],
-  });
-
-  const reprint = React.useCallback(() => {
-    stdout.write(CLEAR_ALL);
-    setEpoch((e) => e + 1);
-  }, [stdout]);
+  const [interaction, dispatchInteraction] = React.useReducer(interactionReducer, initialInteraction);
+  const [measured, setMeasured] = React.useState<ReadonlyMap<string, number>>(() => new Map());
+  const entryKeysRef = React.useRef<ReadonlySet<string>>(new Set());
+  // The viewport reports after every render; returning the previous state when
+  // nothing moved keeps that from re-rendering forever.
+  const onMeasure = React.useCallback((next: ReadonlyMap<string, number>) => {
+    setMeasured((prev) => {
+      let changed = false;
+      for (const [key, h] of next) {
+        if (!entryKeysRef.current.has(key)) continue;
+        if (prev.get(key) !== h) {
+          changed = true;
+          break;
+        }
+      }
+      if (!changed) return prev;
+      const merged = new Map<string, number>();
+      for (const [key, h] of next) {
+        if (entryKeysRef.current.has(key)) merged.set(key, h);
+      }
+      return merged;
+    });
+  }, []);
 
   React.useEffect(() => {
-    let cols = stdout.columns || 80;
     const onResize = (): void => {
-      const next = { cols: stdout.columns || 80, rows: stdout.rows || 24 };
-      setSize(next);
- // Lines printed at the old width re-wrap unpredictably; reprint them.
-      if (next.cols !== cols) {
-        cols = next.cols;
-        reprint();
-      }
+      setSize({ cols: stdout.columns || 80, rows: stdout.rows || 24 });
     };
     stdout.on("resize", onResize);
     return () => {
       stdout.off("resize", onResize);
     };
-  }, [stdout, reprint]);
+  }, [stdout]);
 
  // Stray stderr writes (provider retries, library warnings) would tear the
  // frame; cli.tsx diverts them here and they surface as a notice.
@@ -886,54 +907,27 @@ export function App(props: AppProps): React.ReactElement {
 
   const keys = rowKeys(state.rows);
   const settled = settledCount(state.rows, state.busy);
-  if (printedRef.current.epoch !== epoch) {
-    printedRef.current = { epoch, keys: new Set(), items: [{ key: "welcome" }] };
-  }
-  const printed = printedRef.current;
-  const current = new Set(keys);
- // A printed row vanished (/clear, /rewind, session switch): the scrollback
- // no longer matches the transcript, so wipe and reprint it.
- // Transient rows (retry banners, rate-limit notices) may drop out on their
- // own; only a vanished message or tool call means the history changed.
-  let stale = false;
-  for (const k of printed.keys) {
-    if (/^[uat]:/.test(k) && !current.has(k)) {
-      stale = true;
-      break;
-    }
-  }
-  if (!stale) {
-    for (let i = 0; i < settled; i++) {
-      const k = keys[i]!;
-      if (printed.keys.has(k)) continue;
-      printed.keys.add(k);
-      const row = state.rows[i]!;
-      if (isVisibleRow(row) && !(row.kind === "goal" && row.status === "running")) printed.items.push({ key: k, row });
-    }
-  }
-  React.useLayoutEffect(() => {
-    if (stale) reprint();
-  }, [stale, reprint]);
-
-  const liveRows: { key: string; row: Row }[] = [];
-  for (let i = 0; i < state.rows.length; i++) {
-    const row = state.rows[i]!;
-    const runningGoal = row.kind === "goal" && row.status === "running";
-    if (runningGoal || (i >= settled && !printed.keys.has(keys[i]!) && isVisibleRow(row))) liveRows.push({ key: keys[i]!, row });
-  }
 
   const chromeRef = React.useRef<DOMElement>(null);
-  const [chromeHeight, setChromeHeight] = React.useState(8);
-  React.useEffect(() => {
+  // null until measured: the first frame is laid out (and flushed) before the
+  // layout effect below runs, so any guess at the chrome height is a guess that
+  // can be too small. Too small overflows the terminal on short windows and Ink
+  // answers with clearTerminal (2J 3J, wiping the scrollback), so the first frame
+  // renders a minimal transcript instead.
+  const [chromeHeight, setChromeHeight] = React.useState<number | null>(null);
+ // Layout effect, not effect: a chrome box taller than the guess would push the
+ // frame to the terminal height for one paint, and Ink answers that by clearing
+ // the screen *and* the scrollback (its clearTerminal includes 3J).
+  React.useLayoutEffect(() => {
     if (!chromeRef.current) return;
     const h = measureElement(chromeRef.current).height;
     if (h !== chromeHeight) setChromeHeight(h);
   });
- // Leave several rows of slack: Ink's log-update appends a trailing newline, and
- // a single over-wide CJK line (terminal wrap) is enough to scroll a blank into
- // scrollback when the frame already sits on the last row.
-  const liveBudget = Math.max(0, size.rows - chromeHeight - 4);
-  const liveEstimate = liveRows.reduce((n, r) => n + estimateRowHeight(r.row, size.cols), 0);
+ // Two rows of slack: Ink appends a trailing newline to every frame, and a single
+ // over-wide CJK line can wrap once more than we counted.
+  const transcriptHeight =
+    chromeHeight === null ? 3 : Math.max(3, size.rows - chromeHeight - 2);
+  const liveMaxLines = Math.max(3, transcriptHeight - 6);
 
   const modalOpen =
     pendingPerm !== undefined ||
@@ -941,8 +935,60 @@ export function App(props: AppProps): React.ReactElement {
     showConnect ||
     showSetup ||
     showModelPicker ||
+    showHelp ||
     selectOverlay !== null ||
     textOverlay !== null;
+
+  const welcome = (
+    <WelcomeBanner
+      version="1.0.0"
+      model={state.model}
+      providerId={state.providerId}
+      cwd={state.cwd}
+      agentMode={state.agentMode}
+      permissionMode={state.permissionMode}
+      connection={connectionLabel(connection)}
+      width={size.cols}
+    />
+  );
+  const entries = buildTranscriptEntries({
+    rows: state.rows,
+    keys,
+    cols: size.cols,
+    interaction,
+    welcome,
+    liveFrom: settled,
+    liveMaxLines,
+  });
+  // Estimated heights are guesses; every rendered row reports its real height so
+  // the window arithmetic matches the screen. Pruned to live keys each render so
+  // a long session does not accumulate measurements for discarded rows.
+  entryKeysRef.current = new Set(entries.map((e) => e.key));
+  const heights = entries.map((e) => measured.get(e.key) ?? e.height);
+  const layout = viewportLayout(heights, transcriptHeight, interaction.scroll);
+  const drilled = interaction.viewing;
+  const drilledRuns = drilled ? runsForKey(state.rows, keys, drilled.key) : [];
+  const focused = interaction.focus >= 0;
+  const page = Math.max(5, Math.floor(transcriptHeight / 2));
+
+  const moveFocus = (delta: number): void => {
+    const next = nextFocusable(entries, interaction.focus, delta);
+    if (next < 0) return;
+    dispatchInteraction({ type: "focus", index: next });
+    const scroll = scrollToShow(heights, transcriptHeight, interaction.scroll, next);
+    if (scroll !== interaction.scroll) dispatchInteraction({ type: "scroll-to", value: scroll });
+  };
+
+  /** Open a row: sub-agent entries drill in, collapsible ones flip. */
+  const activate = (index: number): void => {
+    const entry = entries[index];
+    if (!entry) return;
+    if (entry.drill) {
+      dispatchInteraction({ type: "enter", key: entry.drill.key, run: entry.drill.run });
+      return;
+    }
+    if (entry.interactive) dispatchInteraction({ type: "toggle", key: entry.key, open: entry.open });
+  };
 
   useInput(
     (input, key) => {
@@ -952,39 +998,130 @@ export function App(props: AppProps): React.ReactElement {
         void applyAgentMode(nextAgentMode(state.agentMode));
         return;
       }
-      if (key.ctrl && input === "o") setViewerOpen(true);
+      if (key.ctrl && input === "o") {
+        setViewerOpen(true);
+        return;
+      }
+
+      if (drilled) {
+        const { maxScroll } = dialogWindow(drilledRuns[drilled.run], transcriptHeight);
+        // Both keys the footer advertises close the dialog: Esc is muscle memory
+        // from the prompt, Enter/Space match a confirm-shaped overlay.
+        if (isEscape(input, key) || key.return || input === " ") {
+          dispatchInteraction({ type: "back" });
+        } else if (key.leftArrow) {
+          dispatchInteraction({ type: "run", delta: -1, count: drilledRuns.length });
+        } else if (key.rightArrow) {
+          dispatchInteraction({ type: "run", delta: 1, count: drilledRuns.length });
+        } else if (key.upArrow) {
+          dispatchInteraction({ type: "scroll", delta: 1, max: maxScroll });
+        } else if (key.downArrow) {
+          dispatchInteraction({ type: "scroll", delta: -1, max: maxScroll });
+        } else if (key.pageUp) {
+          dispatchInteraction({ type: "scroll", delta: Math.max(1, transcriptHeight - 8), max: maxScroll });
+        } else if (key.pageDown) {
+          dispatchInteraction({ type: "scroll", delta: -Math.max(1, transcriptHeight - 8), max: maxScroll });
+        }
+        return;
+      }
+
+      // Tab hands the keyboard to the transcript and back. While the transcript
+      // has it the prompt is disabled, so ↑/↓ mean the transcript in both places.
+      if (key.tab) {
+        dispatchInteraction({ type: "focus", index: focused ? -1 : lastFocusable(entries) });
+        return;
+      }
+      if (focused) {
+        if (isEscape(input, key)) {
+          dispatchInteraction({ type: "focus", index: -1 });
+          return;
+        }
+        if (key.upArrow) {
+          moveFocus(-1);
+          return;
+        }
+        if (key.downArrow) {
+          moveFocus(1);
+          return;
+        }
+        // Ink maps \r to `return` and \n to `enter`; PTYs and paste paths deliver
+        // either, so accept both.
+        if (key.return || input === "\n") {
+          activate(interaction.focus);
+          return;
+        }
+      }
+      if (key.pageUp) dispatchInteraction({ type: "scroll", delta: -page, max: layout.window.maxScroll });
+      if (key.pageDown) dispatchInteraction({ type: "scroll", delta: page, max: layout.window.maxScroll });
     },
     { isActive: !modalOpen && !viewerOpen },
   );
 
-  const renderPrinted = (item: PrintedItem): React.ReactElement =>
-    renderPrintedItem(item, {
-      model: state.model,
-      providerId: state.providerId,
-      cwd: state.cwd,
-      agentMode: state.agentMode,
-      permissionMode: state.permissionMode,
-      connection: connectionLabel(connection),
-      width: size.cols,
-    });
-  const transcript = (
-    <Static key={`s-${epoch}`} items={printed.items.slice()}>
-      {renderPrinted}
-    </Static>
+  // Clicks and the wheel. The frame is anchored at the top of the screen (cli.tsx
+  // clears before the first paint), so a mouse row maps straight to a viewport
+  // line without any scroll-offset bookkeeping.
+  const mouseRef = React.useRef<(e: TermMouseEvent) => void>(() => {});
+  mouseRef.current = (e) => {
+    // The help panel routes its own clicks and wheel; letting the wheel through
+    // here too would scroll the transcript hidden underneath it.
+    if (showHelp) return;
+    if (e.action === "release" || e.button === "none") return;
+    if (e.button === "wheelUp" || e.button === "wheelDown") {
+      const delta = (e.button === "wheelUp" ? 3 : -3) * (e.shift ? 3 : 1);
+      dispatchInteraction({ type: "scroll", delta, max: layout.window.maxScroll });
+      return;
+    }
+    if (e.button !== "left" || modalOpen || viewerOpen) return;
+    const index = entryAtScreenY(heights, layout, e.y);
+    if (index < 0) return;
+    dispatchInteraction({ type: "focus", index });
+    activate(index);
+  };
+  React.useEffect(() => onTermMouse((e) => mouseRef.current(e)), []);
+
+  const transcript = drilled ? (
+    <AgentDialog
+      runs={drilledRuns}
+      index={drilled.run}
+      height={transcriptHeight}
+      width={size.cols}
+      scroll={interaction.scroll}
+    />
+  ) : (
+    <TranscriptViewport
+      entries={entries}
+      heights={heights}
+      height={transcriptHeight}
+      scroll={interaction.scroll}
+      onMeasure={onMeasure}
+    />
   );
 
   if (viewerOpen) {
     return (
-      <Box flexDirection="column" width="100%">
-        {transcript}
+      <Box flexDirection="column" width="100%" height={Math.max(6, size.rows - 1)}>
         <ToolViewer
           rows={state.rows}
           width={size.cols}
           height={Math.max(6, size.rows - 1)}
-          onClose={() => {
-            setViewerOpen(false);
- // The overlay covered the screen; bring the transcript back into view.
-            reprint();
+          onClose={() => setViewerOpen(false)}
+        />
+      </Box>
+    );
+  }
+
+  if (showHelp) {
+    return (
+      <Box flexDirection="column" width="100%" height={Math.max(6, size.rows - 1)} overflow="hidden">
+        <HelpPanel
+          width={size.cols}
+          height={Math.max(6, size.rows - 1)}
+          version={VERSION}
+          model={state.model}
+          onClose={() => setShowHelp(false)}
+          onInsert={(command) => {
+            setShowHelp(false);
+            dispatch({ type: "set-input", value: command });
           }}
         />
       </Box>
@@ -992,22 +1129,12 @@ export function App(props: AppProps): React.ReactElement {
   }
 
   return (
-    <Box flexDirection="column" width="100%">
+    // Hard cap one row above the terminal height. The transcript height is an
+    // estimate until the chrome is measured, and any frame whose output reaches
+    // the terminal height makes Ink emit clearTerminal (2J 3J) — which also wipes
+    // the scrollback. Clipping a row is recoverable; losing history is not.
+    <Box flexDirection="column" width="100%" height={Math.max(4, size.rows - 1)} overflow="hidden">
       {transcript}
-
-      {liveRows.length > 0 && liveBudget >= 3 ? (
-        <Box
-          flexDirection="column"
-          paddingX={1}
-          {...(liveEstimate > liveBudget
-            ? { height: liveBudget, overflowY: "hidden" as const, justifyContent: "flex-end" as const }
-            : {})}
-        >
-          {liveRows.map(({ key, row }) => (
-            <TranscriptItem key={key} row={row} live maxLines={Math.max(3, liveBudget - 4)} />
-          ))}
-        </Box>
-      ) : null}
 
       <Box ref={chromeRef} flexDirection="column">
       {state.busy ? (
@@ -1037,6 +1164,7 @@ export function App(props: AppProps): React.ReactElement {
             toolName={pendingPerm.toolName}
             input={pendingPerm.input}
             reason={pendingPerm.reason}
+            preview={pendingPerm.preview}
             onDecide={onPermissionDecide}
           />
         </Box>

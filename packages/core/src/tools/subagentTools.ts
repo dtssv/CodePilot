@@ -62,3 +62,27 @@ export function buildSubagentToolRegistry(
   }
   return r;
 }
+
+/**
+ * Narrow a sub-agent registry to `tools`. Names not in the pool are dropped
+ * (never granted). If every name is out-of-pool, fall back to the full pool.
+ */
+export function narrowSubagentTools(
+  pool: ToolRegistry,
+  tools: string[] | undefined,
+): { registry: ToolRegistry; dropped: string[] } {
+  if (!tools || tools.length === 0) {
+    return { registry: pool, dropped: [] };
+  }
+  const registry = new ToolRegistry();
+  const dropped: string[] = [];
+  for (const n of tools) {
+    const t = pool.get(n);
+    if (t) registry.register(t);
+    else dropped.push(n);
+  }
+  if (registry.names().length === 0) {
+    return { registry: pool, dropped };
+  }
+  return { registry, dropped };
+}

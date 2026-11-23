@@ -51,6 +51,8 @@ export interface AppState {
   sessions: { id: string; title: string; updatedAt: number; cwd: string; liveWriterPid?: number }[];
  /** Follow-up prompts waiting while the current run is busy. */
   followUps?: FollowUpItem[];
+ /** Injects queued via Inject, waiting for the current step to finish. */
+  pendingSteers?: string[];
   /** Exclusive index for `session/history` backfill; absent when history is complete. */
   historyBefore?: number;
   /** True while this handle is a read-only snapshot of a lease held elsewhere. */
@@ -105,6 +107,7 @@ export type Action =
   | { type: "question-resolved"; requestId?: string }
   | { type: "sessions"; sessions: AppState["sessions"] }
   | { type: "notice"; text?: string }
+  | { type: "pending-steer"; text: string }
   | { type: "agent-mode"; mode: AgentMode }
   | { type: "endpoint"; model: string; providerId?: string }
   | { type: "set-cwd"; cwd: string }
@@ -168,6 +171,7 @@ export function reducer(state: AppState, action: Action): AppState {
         // queued follow-ups / last-request leak into session B's composer.
         // Genuine follow-ups arrive via the replayed `followup` events below.
         followUps: undefined,
+        pendingSteers: undefined,
         lastRequest: undefined,
         permission: undefined,
         question: undefined,
@@ -189,6 +193,8 @@ export function reducer(state: AppState, action: Action): AppState {
     case "history-prepend": {
       // Fold older events into a fresh prefix, then put them ahead of the
       // already-painted tail without replaying the whole transcript.
+      // Usage (and similar accumulators) from the prefix MUST be merged —
+      // otherwise the footer totals stay stuck on the resume-tail sum.
       let prefix: AppState = {
         ...state,
         rows: [],
@@ -203,6 +209,7 @@ export function reducer(state: AppState, action: Action): AppState {
       return {
         ...state,
         rows: [...clearTransientRetryRows(prefix.rows), ...state.rows],
+        usage: addUsage(prefix.usage, state.usage),
         historyBefore: action.historyTruncated ? action.historyBefore : undefined,
       };
     }
@@ -234,6 +241,11 @@ export function reducer(state: AppState, action: Action): AppState {
       return { ...state, sessions: action.sessions };
     case "notice":
       return { ...state, notice: action.text };
+    case "pending-steer": {
+      const text = action.text.trim();
+      if (!text) return state;
+      return { ...state, pendingSteers: [...(state.pendingSteers ?? []), text] };
+    }
     case "agent-mode":
       return { ...state, agentMode: action.mode };
     case "endpoint":
@@ -267,6 +279,7 @@ export function reducer(state: AppState, action: Action): AppState {
         turnBudget: undefined,
         subagents: undefined,
         followUps: undefined,
+        pendingSteers: undefined,
         lastRequest: undefined,
         permission: undefined,
         question: undefined,
@@ -459,11 +472,26 @@ function applyEvent(state: AppState, e: Event, replay = false): AppState {
             images: e.images,
             files: e.files,
             model: e.model,
+            ...(e.steer ? { steer: true } : {}),
             streaming: false,
           },
         });
       }
-      return { ...state, rows, model: e.model ?? state.model };
+      // Applied corrections clear the matching pending chip (FIFO by text)
+      // and drop the "will apply after current step" notice.
+      let pendingSteers = state.pendingSteers;
+      let notice = state.notice;
+      if (e.role === "user" && e.steer) {
+        if (pendingSteers && pendingSteers.length > 0) {
+          const idx = pendingSteers.findIndex((t) => t === text);
+          if (idx >= 0) {
+            pendingSteers = [...pendingSteers.slice(0, idx), ...pendingSteers.slice(idx + 1)];
+            if (pendingSteers.length === 0) pendingSteers = undefined;
+          }
+        }
+        notice = undefined;
+      }
+      return { ...state, rows, pendingSteers, notice, model: e.model ?? state.model };
     }
 
     case "tool_call": {
@@ -674,13 +702,13 @@ function applyEvent(state: AppState, e: Event, replay = false): AppState {
       };
 
     case "model":
+      // Update chip state only — no toast. New-session default model events
+      // used to cover the composer for the toast duration; the ModelPicker
+      // already shows the active model.
       return {
         ...state,
         model: e.model,
         providerId: e.providerId ?? state.providerId,
-        notice: e.providerId
-          ? `model → ${e.providerId} · ${e.model}`
-          : `model → ${e.model}`,
       };
 
     case "mode_request":

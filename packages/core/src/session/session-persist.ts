@@ -1,7 +1,12 @@
 // JSONL load/persist and system-prompt rebuild. Extracted from Session (move-only split).
 
-import { appendFile, mkdir, readFile, truncate } from "node:fs/promises";
-import { decideLazyMcp, listAdvertisedToolNames } from "../agent/agent-messages.js";
+import { appendFile, mkdir, readFile, truncate, writeFile } from "node:fs/promises";
+import {
+  decideLazyMcp,
+  listAdvertisedToolNames,
+  rememberAdvertisedToolNames,
+} from "../agent/agent-messages.js";
+import { resolveDeferredWire } from "../tools/wirePolicy.js";
 import { loadAutoMemoryPromptStub, type AutoMemoryConfig } from "../memory/autoMemory.js";
 import { readMemory, readProjectInstructions, summariseMemory } from "../memory/memory.js";
 import {
@@ -16,8 +21,10 @@ import {
 } from "../systemPrompt/index.js";
 import { renderCustomAgentsBlock, type CustomAgent } from "../skills/customAgents.js";
 import type { Skill } from "../skills/skills.js";
+import type { McpManager } from "../mcp/mcp.js";
 import { extractPlan, liveTranscript } from "../compaction/compaction.js";
 import type { AgentMode, CodepilotConfig, Event, ImageAttachment } from "../types.js";
+import { applyProviderAndModel } from "../config/providerCatalog.js";
 import { PermissionEngine } from "../permissions/permissions.js";
 import { ArtifactStore } from "../tools/artifacts.js";
 import type { ToolRegistry } from "../tools/types.js";
@@ -26,8 +33,12 @@ import { CORE_VERSION, linkIdForEvent, readGitBranch, stampEventMeta } from "../
 import { thawSession, readColdSessionText } from "./sessionCompression.js";
 import {
   SESSIONS_DIR,
+  deriveTitleFromText,
+  firstTitleWorthyUserText,
+  isWeakTitleSource,
   loadTitleFromDisk,
   sessionPath,
+  titleSidecarPath,
 } from "./session-utils.js";
 import { eventHasOffloadedImages } from "./session-helpers.js";
 import type { BoundedSinkQueue } from "./sessionSink.js";
@@ -53,6 +64,7 @@ export type PersistHost = {
   readOnly: boolean;
   config: CodepilotConfig;
   model: string;
+  activeProviderId: string | undefined;
   mode: AgentMode;
   events: Event[];
   persisted: Event[];
@@ -62,6 +74,8 @@ export type PersistHost = {
   title: string | null;
   tornTailRepairs: number;
   toolRegistry: ToolRegistry;
+  /** Session-monotonic wire tool names (prompt-cache stability). */
+  advertisedToolNames: Set<string>;
   artifacts: ArtifactStore;
   sandbox: ResolvedSandbox;
   permissions: PermissionEngine;
@@ -73,7 +87,13 @@ export type PersistHost = {
   outputStyle: OutputStyle;
   resumedFromInterrupt: boolean;
   _sandboxUnavailable: boolean;
+  /** Live MCP manager (null when none / still starting). */
+  mcp: McpManager | null;
   systemPromptCache: SystemPromptCache;
+  /** Last provider-reported input tokens (context gauge / compaction anchor). */
+  lastProviderInputTokens: number;
+  contextAnchor: { input: number; eventCount: number } | null;
+  foldedToolResultStubs: Map<string, string>;
   eventSink: BoundedSinkQueue | undefined;
   notify(e: Event): void;
   rebuildUndoStacks(): void;
@@ -305,13 +325,55 @@ export async function sessionLoadFromDisk(host: PersistHost): Promise<void> {
       else if (e.type === "message" && e.role === "user") userMessages += 1;
     }
     host.turnCounter = Math.max(maxTurn, userMessages);
+    // Restore the last chosen model/provider from JSONL `type:"model"` events;
+    // without it resume keeps the process default and a wrong model busts the
+    // prompt-cache prefix.
+    rehydrateModelFromPersisted(host);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== "ENOENT") throw err;
   }
- // Hydrate title from sidecar (if any).
+ // Hydrate title from sidecar; if missing or a weak nudge ("继续"), recover
+ // from the first real user prompt so resume does not retitle the session.
   const t = await loadTitleFromDisk(host.id);
-  if (t) host.title = t;
+  if (t && !isWeakTitleSource(t)) {
+    host.title = t;
+  } else {
+    const first = firstTitleWorthyUserText(host.persisted);
+    if (first) {
+      const derived = deriveTitleFromText(first);
+      if (derived && derived !== "(untitled)") {
+        host.title = derived;
+        await writeFile(titleSidecarPath(host.id), derived, "utf-8").catch(() => undefined);
+      }
+    }
+  }
+}
+
+/** Apply the latest `{ type: "model" }` event onto the in-memory session. */
+export function rehydrateModelFromPersisted(host: PersistHost): void {
+  let last: Extract<Event, { type: "model" }> | undefined;
+  for (const e of host.persisted) {
+    if (e.type === "model") last = e;
+  }
+  if (!last?.model) return;
+  const prevModel = host.model;
+  const prevProvider = host.activeProviderId;
+  const applied = applyProviderAndModel(
+    host.config,
+    last.providerId,
+    last.model,
+  );
+  host.config = applied.config;
+  host.model = applied.model;
+  host.activeProviderId = applied.providerId;
+  // Same as setEndpoint: a restored model re-bills the prompt under its own
+  // tokeniser / window, so prior measurements must not anchor the gauge.
+  if (applied.model !== prevModel || applied.providerId !== prevProvider) {
+    host.lastProviderInputTokens = 0;
+    host.contextAnchor = null;
+    host.foldedToolResultStubs.clear();
+  }
 }
 
 export async function sessionPersistEvent(host: PersistHost, e: Event): Promise<void> {
@@ -391,6 +453,7 @@ export async function sessionRebuildSystemPrompt(
         toolNames: [],
         deliveryRoots: host.deliveryRoots,
         sessionNotes: await buildSessionNotes(host),
+        mcpInstructions: host.mcp?.listAllInstructions() ?? [],
         model: host.model,
         provider: host.config.provider ?? "anthropic",
         mode: host.mode,
@@ -441,7 +504,10 @@ export async function sessionRebuildSystemPrompt(
     lazyPlugin,
     model: host.model,
     toolExposure: host.config.toolExposure,
+    previouslyAdvertised: host.advertisedToolNames,
+    deferredWire: resolveDeferredWire(host.config),
   });
+  rememberAdvertisedToolNames(host.advertisedToolNames, toolNames);
   const sessionNotes = await buildSessionNotes(host);
   host.systemPromptCache = await buildSystemPrompt({
     cwd: host.cwd,
@@ -451,6 +517,7 @@ export async function sessionRebuildSystemPrompt(
     plan,
     toolNames,
     skills: host.discoveredSkills,
+    mcpInstructions: host.mcp?.listAllInstructions() ?? [],
     scratchDir: scratchDir(host.cwd, host.id),
     projectStateDir: projectStatePath(host.cwd),
     deliveryRoots: host.deliveryRoots,

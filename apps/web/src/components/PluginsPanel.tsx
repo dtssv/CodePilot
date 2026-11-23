@@ -77,6 +77,7 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
   const [describe, setDescribe] = useState<Record<string, string>>({});
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"list" | "add">("list");
+  const [tab, setTab] = useState<"installed" | "market">("installed");
   const [sourceInput, setSourceInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
@@ -122,6 +123,16 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
     [installed],
   );
 
+  const filteredInstalled = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return installed;
+    return installed.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.description.toLowerCase().includes(q),
+    );
+  }, [installed, query]);
+
   const filteredMarket = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return market;
@@ -165,6 +176,7 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
       setReportError(undefined);
       setSourceInput("");
       setView("list");
+      setTab("installed");
       await reload();
     } catch (err) {
       setError(describeError(err));
@@ -208,9 +220,6 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <h3 className="text-[13px] font-semibold text-[var(--color-ink)]">{t("Plugin manager")}</h3>
-          <p className="mt-0.5 text-[11.5px] leading-4 text-[var(--color-ink-faint)]">
-            {t("Plugins bundle skills, agents, commands, hooks, and MCP servers. Installing runs the plugin's code in the current session.")}
-          </p>
         </div>
         {view === "list" ? (
           <button
@@ -269,9 +278,6 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
             }}
             spellCheck={false}
           />
-          <p className="text-[11px] leading-4 text-[var(--color-ink-faint)]">
-            {t("A git URL is cloned; a local path is copied.")}
-          </p>
           {confirming === "__url__" && (
             <div className="space-y-2 rounded-lg border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-2.5 py-2">
               {inspecting === sourceInput.trim() ? (
@@ -315,19 +321,38 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
         </div>
       ) : (
         <>
-          <input
-            className="cp-input w-full text-[12.5px]"
-            placeholder={t("Search plugins…")}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              className="cp-input min-w-0 flex-1 text-[12.5px]"
+              placeholder={t("Search plugins…")}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {(
+              [
+                ["installed", t("Installed"), installed.length],
+                ["market", t("Marketplace"), market.length],
+              ] as const
+            ).map(([id, label, count]) => (
+              <button
+                key={id}
+                type="button"
+                className={tab === id ? "cp-btn py-1 text-[11px]" : "cp-btn-ghost py-1 text-[11px]"}
+                onClick={() => {
+                  setTab(id);
+                  setConfirming(null);
+                  setReport(null);
+                  setReportError(undefined);
+                }}
+              >
+                {label} ({count})
+              </button>
+            ))}
+          </div>
 
-          {installed.length > 0 && (
+          {tab === "installed" ? (
             <div className="space-y-1.5">
-              <div className="text-[12px] font-medium text-[var(--color-ink)]">
-                {t("Installed")} ({installed.length})
-              </div>
-              {installed.map((p) => (
+              {filteredInstalled.map((p) => (
                 <div
                   key={p.name}
                   className="flex items-center gap-2.5 rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2.5"
@@ -370,110 +395,117 @@ export function PluginsPanel({ cp }: { cp: Codepilot }): React.ReactElement {
                   </button>
                 </div>
               ))}
+              {filteredInstalled.length === 0 && (
+                <p className="py-6 text-center text-[12px] text-[var(--color-ink-faint)]">
+                  {installed.length === 0 ? t("No plugins installed.") : t("No matching plugins.")}
+                </p>
+              )}
             </div>
-          )}
-
-          <div className="space-y-1.5">
-            <div className="text-[12px] font-medium text-[var(--color-ink)]">
-              {t("Marketplace")} ({filteredMarket.length})
-            </div>
-            {filteredMarket.map((p) => {
-              const already = installedNames.has(p.name);
-              const isConfirming = confirming === p.name;
-              return (
-                <div
-                  key={p.name}
-                  className="rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2.5"
-                >
-                  <div className="flex items-start gap-2.5">
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-baseline gap-1.5">
-                        <span className="truncate text-[13px] font-medium text-[var(--color-ink)]">{p.name}</span>
-                        {p.version && (
-                          <span className="shrink-0 text-[11px] text-[var(--color-ink-faint)]">v{p.version}</span>
-                        )}
-                        {p.author && (
-                          <span className="shrink-0 text-[11px] text-[var(--color-ink-faint)]">· {p.author}</span>
-                        )}
-                      </span>
-                      <span className="mt-0.5 block text-[11.5px] leading-4 text-[var(--color-ink-dim)]">
-                        {p.description}
-                      </span>
-                      {p.tags && p.tags.length > 0 && (
-                        <span className="mt-1 flex flex-wrap gap-1">
-                          {p.tags.map((tag) => (
-                            <span
-                              key={tag}
-                              className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-faint)]"
-                            >
-                              {tag}
+          ) : (
+            <div className="space-y-1.5">
+              {filteredMarket.map((p) => {
+                const already = installedNames.has(p.name);
+                const isConfirming = confirming === p.name;
+                return (
+                  <div
+                    key={p.name}
+                    className="rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] px-3 py-2.5"
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <span className="min-w-0 flex-1">
+                        <span className="flex flex-wrap items-baseline gap-1.5">
+                          <span className="truncate text-[13px] font-medium text-[var(--color-ink)]">{p.name}</span>
+                          {p.version && (
+                            <span className="shrink-0 text-[11px] text-[var(--color-ink-faint)]">v{p.version}</span>
+                          )}
+                          {p.author && (
+                            <span className="shrink-0 text-[11px] text-[var(--color-ink-faint)]">· {p.author}</span>
+                          )}
+                          {already && (
+                            <span className="shrink-0 rounded bg-[var(--color-accent-dim)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-ink)]">
+                              {t("Installed")}
                             </span>
-                          ))}
+                          )}
                         </span>
+                        <span className="mt-0.5 block text-[11.5px] leading-4 text-[var(--color-ink-dim)]">
+                          {p.description}
+                        </span>
+                        {p.tags && p.tags.length > 0 && (
+                          <span className="mt-1 flex flex-wrap gap-1">
+                            {p.tags.map((tag) => (
+                              <span
+                                key={tag}
+                                className="rounded bg-[var(--color-surface)] px-1.5 py-0.5 text-[10px] text-[var(--color-ink-faint)]"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </span>
+                      {already ? (
+                        <span className="shrink-0 py-1 text-[11px] text-[var(--color-ink-faint)]">{t("Installed")}</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="cp-btn shrink-0 py-1 text-[11px]"
+                          disabled={busy}
+                          onClick={() =>
+                            isConfirming ? setConfirming(null) : void doInspect(p.source, p.name)
+                          }
+                        >
+                          {t("Install")}
+                        </button>
                       )}
-                    </span>
-                    {already ? (
-                      <span className="shrink-0 py-1 text-[11px] text-[var(--color-ink-faint)]">{t("Installed")}</span>
-                    ) : (
-                      <button
-                        type="button"
-                        className="cp-btn shrink-0 py-1 text-[11px]"
-                        disabled={busy}
-                        onClick={() =>
-                          isConfirming ? setConfirming(null) : void doInspect(p.source, p.name)
-                        }
-                      >
-                        {t("Install")}
-                      </button>
+                    </div>
+                    {isConfirming && !already && (
+                      <div className="mt-2 space-y-2 rounded-lg border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-2.5 py-2">
+                        <p className="text-[11px] leading-4 text-[var(--color-ink-dim)]">
+                          {describe[p.name] ?? `${t("Installs from")}: ${p.source}`}
+                        </p>
+                        {inspecting === p.source ? (
+                          <p className="text-[11px] text-[var(--color-ink-faint)]">{t("Inspecting")}…</p>
+                        ) : reportError ? (
+                          <p className="text-[11px] text-[var(--color-remove)]">{reportError}</p>
+                        ) : report ? (
+                          <CapabilityReportView report={report} />
+                        ) : null}
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            className="cp-btn-ghost py-1 text-[11px]"
+                            disabled={busy}
+                            onClick={() => {
+                              setConfirming(null);
+                              setReport(null);
+                              setReportError(undefined);
+                            }}
+                          >
+                            {t("Cancel")}
+                          </button>
+                          <button
+                            type="button"
+                            className="cp-btn py-1 text-[11px]"
+                            disabled={busy || inspecting === p.source}
+                            onClick={() => void doInstall(p.source)}
+                          >
+                            {busy ? `${t("Installing")}…` : t("Confirm install")}
+                          </button>
+                        </div>
+                      </div>
                     )}
                   </div>
-                  {isConfirming && !already && (
-                    <div className="mt-2 space-y-2 rounded-lg border border-[var(--color-warn)]/30 bg-[var(--color-warn)]/10 px-2.5 py-2">
-                      <p className="text-[11px] leading-4 text-[var(--color-ink-dim)]">
-                        {describe[p.name] ?? `${t("Installs from")}: ${p.source}`}
-                      </p>
-                      {inspecting === p.source ? (
-                        <p className="text-[11px] text-[var(--color-ink-faint)]">{t("Inspecting")}…</p>
-                      ) : reportError ? (
-                        <p className="text-[11px] text-[var(--color-remove)]">{reportError}</p>
-                      ) : report ? (
-                        <CapabilityReportView report={report} />
-                      ) : null}
-                      <div className="flex justify-end gap-2">
-                        <button
-                          type="button"
-                          className="cp-btn-ghost py-1 text-[11px]"
-                          disabled={busy}
-                          onClick={() => {
-                            setConfirming(null);
-                            setReport(null);
-                            setReportError(undefined);
-                          }}
-                        >
-                          {t("Cancel")}
-                        </button>
-                        <button
-                          type="button"
-                          className="cp-btn py-1 text-[11px]"
-                          disabled={busy || inspecting === p.source}
-                          onClick={() => void doInstall(p.source)}
-                        >
-                          {busy ? `${t("Installing")}…` : t("Confirm install")}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-            {filteredMarket.length === 0 && (
-              <p className="py-6 text-center text-[12px] text-[var(--color-ink-faint)]">
-                {market.length === 0
-                  ? t("No marketplace entries available.")
-                  : t("No matching plugins.")}
-              </p>
-            )}
-          </div>
+                );
+              })}
+              {filteredMarket.length === 0 && (
+                <p className="py-6 text-center text-[12px] text-[var(--color-ink-faint)]">
+                  {market.length === 0
+                    ? t("No marketplace entries available.")
+                    : t("No matching plugins.")}
+                </p>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

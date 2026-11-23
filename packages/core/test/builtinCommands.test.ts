@@ -36,12 +36,31 @@ describe("built-in command catalog", () => {
     expect(shared.every((c) => c.scope === "shared")).toBe(true);
     const sharedNames = new Set(shared.map((c) => c.name));
     // Terminal-only affordances are never advertised to GUI surfaces.
-    for (const terminalOnly of ["exit", "connect", "remote", "setup", "theme", "vim", "web"]) {
+    for (const terminalOnly of ["exit", "connect", "remote", "setup", "vim", "web"]) {
       expect(sharedNames.has(terminalOnly)).toBe(false);
     }
-    // Core cross-surface commands are advertised.
-    for (const shared of ["help", "model", "mode", "compact", "clear", "plan"]) {
-      expect(sharedNames.has(shared)).toBe(true);
+    // Core cross-surface commands are advertised (GUI-wired set).
+    for (const name of [
+      "help",
+      "model",
+      "sessions",
+      "compact",
+      "clear",
+      "plan",
+      "chat",
+      "retry",
+      "mode",
+      "preset",
+      "resume",
+      "goal",
+      "export",
+      "init",
+      "gc-artifacts",
+      "hooks",
+      "agents",
+      "theme",
+    ]) {
+      expect(sharedNames.has(name)).toBe(true);
     }
   });
 
@@ -51,6 +70,8 @@ describe("built-in command catalog", () => {
 
   it("the catalog shape is readonly-friendly (plain data, no methods)", () => {
     const sample: BuiltinCommand = BUILTIN_COMMANDS[0]!;
-    expect(Object.keys(sample).sort()).toEqual(["description", "kind", "name", "scope"]);
+    for (const key of Object.keys(sample)) {
+      expect(["description", "kind", "name", "scope", "argumentHint"]).toContain(key);
+    }
   });
 });

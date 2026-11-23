@@ -27,33 +27,29 @@ import {
   writeFileTool,
   editFileTool,
   applyPatchTool,
-  codeModeTool,
+  makeCodeModeTool,
   harnessBridgeTool,
   diagnosticsTool,
   globTool,
   grepTool,
   lsTool,
-  planUpdateTool,
+  planTool,
   memoryWriteTool,
   readArtifactTool,
   taskTool,
   askUserQuestionTool,
-  planDoneTool,
   startNewTaskTool,
   suggestModeTool,
-  startGoalTool,
-  goalStatusTool,
+  goalTool,
   makeMcpMetaTool,
   makeToolCatalogTool,
-  makeSubagentListTool,
-  makeSubagentWaitTool,
-  makeSubagentInterruptTool,
   type BackgroundSubagentMeta,
   type BackgroundSubagentRegistry,
 } from "../tools/index.js";
 import type { ToolRegistry } from "../tools/types.js";
 import type { HookEngine } from "../hooks/hooks.js";
 import type { ResolvedSandbox } from "../sandbox/sandbox.js";
+import type { McpManager } from "../mcp/mcp.js";
 import type {
   AgentMode,
   CodepilotConfig,
@@ -90,6 +86,8 @@ export type BuiltinHost = {
   skillToolHandle: SkillToolHandle | null;
   lspManager: LspManager | null;
   lastPlanSlug: string | null;
+  /** Live MCP manager (null until startup finishes / when none configured). */
+  getMcpManager?: () => McpManager | null;
   clearWorkingContext(reason?: string): Promise<boolean>;
   expandWritablePath(dir: string, opts?: { persist?: boolean }): Promise<string>;
   addDeliveryRoot(dir: string): void;
@@ -118,8 +116,9 @@ export function registerSessionBuiltins(host: BuiltinHost): void {
   host.toolRegistry.register(editFileTool);
   host.toolRegistry.register(applyPatchTool);
   // Opt-out: `codeMode.enabled: false` drops the tool from the schema table.
+  // Bound to the live registry so deferred tools are reachable via tools.*.
   if (host.config.codeMode?.enabled !== false) {
-    host.toolRegistry.register(codeModeTool);
+    host.toolRegistry.register(makeCodeModeTool(() => host.toolRegistry));
   }
   // harness_bridge invokes an external agent CLI (claude/codex/custom) as a
   // sandboxed subprocess. Opt-in: only register when explicitly enabled, so
@@ -131,7 +130,6 @@ export function registerSessionBuiltins(host: BuiltinHost): void {
   host.toolRegistry.register(globTool);
   host.toolRegistry.register(grepTool);
   host.toolRegistry.register(lsTool);
-  host.toolRegistry.register(planUpdateTool);
   host.toolRegistry.register(readArtifactTool);
   host.toolRegistry.register(askUserQuestionTool);
 
@@ -141,7 +139,7 @@ export function registerSessionBuiltins(host: BuiltinHost): void {
  // mutating the shared one let the newest session's runner (its endpoint,
  // cwd and transcript) serve every other session's `task` calls.
   const memoryWrite = { ...memoryWriteTool };
-  const planDone = { ...planDoneTool };
+  const plan = { ...planTool };
   const task = { ...taskTool };
   // start_new_task: model-triggered task boundary → clearWorkingContext.
   const startNewTask = { ...startNewTaskTool };
@@ -153,12 +151,9 @@ export function registerSessionBuiltins(host: BuiltinHost): void {
   suggestMode.currentMode = () => host.mode;
   suggestMode.autoAccept = () => host.autoAcceptModeSuggestions;
   host.toolRegistry.register(suggestMode);
-  // start_goal: model escalates the current task into a long-horizon goal
-  // loop. The tool emits a `goal_request` event (parsed in the agent loop);
-  // the handle reports whether a host goal-driver accepted it. Without a
-  // host handler it degrades to a no-op ack so the model just continues.
-  const startGoal = { ...startGoalTool };
-  startGoal.onStartGoal = async (objective, maxRounds, reason) => {
+  // goal: escalate into a multi-round loop or report terminal status.
+  const goal = { ...goalTool };
+  goal.onStartGoal = async (objective, maxRounds, reason) => {
     if (!host.onGoalRequest) return false;
     return await host.onGoalRequest({
       objective,
@@ -166,11 +161,7 @@ export function registerSessionBuiltins(host: BuiltinHost): void {
       ...(reason ? { reason } : {}),
     });
   };
-  host.toolRegistry.register(startGoal);
-  // goal_status: structured channel for reporting a goal loop's terminal
-  // state. Emits a `goal_status` event (parsed in the agent loop) the goal
-  // loop trusts ahead of the text markers; a no-op outside a goal loop.
-  host.toolRegistry.register(goalStatusTool);
+  host.toolRegistry.register(goal);
   host.toolRegistry.register(memoryWrite);
   const skillHandle = createSkillTool();
   host.skillToolHandle = skillHandle;
@@ -180,23 +171,30 @@ export function registerSessionBuiltins(host: BuiltinHost): void {
     makeLspNavigateTool(() => host.lspManager, () => host.cwd),
   );
   host.toolRegistry.register(task);
-  host.toolRegistry.register(planDone);
-  // `mcp` meta-tool for on-demand MCP tool discovery (list/describe/call).
-  // Only registered when MCP servers are configured; it becomes the primary
-  // access path when lazy discovery hides individual MCP tool schemas. Reads
-  // the registry lazily so MCP tools that register after boot are visible.
+  host.toolRegistry.register(plan);
+  // When deferredWire is on (default with code_mode), plugin discovery goes
+  // through code_mode.tools.* — skip competing plugin meta-tools. The `mcp`
+  // meta stays registered (and is on DIRECT_WIRE_TOOLS) so prompts/resources
+  // remain reachable without per-item FC tools.
+  const deferredWire =
+    host.config.codeMode?.enabled !== false &&
+    host.config.codeMode?.deferredWire !== false;
   const hasMcp = Object.values(host.config.mcpServers ?? {}).some((c) => c && !c.disabled);
   if (hasMcp) {
-    host.toolRegistry.register(makeMcpMetaTool(() => host.toolRegistry));
+    host.toolRegistry.register(
+      makeMcpMetaTool(
+        () => host.toolRegistry,
+        () => host.getMcpManager?.() ?? null,
+      ),
+    );
   }
-  // `tool_catalog` meta-tool for on-demand access to plugin tools whose
-  // schemas are hidden under lazy discovery. Only registered when plugin lazy
-  // discovery is opted into ("lazy"/"auto"); the default ("eager") sends every
-  // plugin schema directly, so the meta-tool is absent and the default
-  // behaviour is unchanged. Reads the registry lazily so plugin tools that
-  // register after boot are reachable.
+  // `tool_catalog` for plugin tools under lazy discovery — only when not
+  // using code_mode deferred wire (which replaces this path).
   const pluginDiscovery = host.config.pluginToolDiscovery ?? "eager";
-  if (pluginDiscovery === "lazy" || pluginDiscovery === "auto") {
+  if (
+    !deferredWire &&
+    (pluginDiscovery === "lazy" || pluginDiscovery === "auto")
+  ) {
     host.toolRegistry.register(
       makeToolCatalogTool(() => host.toolRegistry, (t) => t.source === "plugin"),
     );
@@ -209,10 +207,8 @@ export function registerSessionBuiltins(host: BuiltinHost): void {
     redactPatterns: host.redactPatterns,
   });
 
- // Wire plan_done's plan-file persistence. The plan is written to
- // .codepilot/plans/<slug>.md before the approval prompt; on approval the
- // file's status is updated.
-  planDone.writePlan = async (summary, steps) => {
+ // Plan-file persistence for `plan` action=done.
+  plan.writePlan = async (summary, steps) => {
     const pf = await writePlanFile(host.cwd, host.id, summary, steps, {
       plansDirectory: host.config.plansDirectory,
       status: "pending",
@@ -220,7 +216,7 @@ export function registerSessionBuiltins(host: BuiltinHost): void {
     host.lastPlanSlug = pf.slug;
     return pf.path;
   };
-  planDone.currentPlan = () => extractPlan(host.events);
+  plan.currentPlan = () => extractPlan(host.events);
 
  // Wire the subagent runner so `task` works. "explore" agents are
  // read-only; "worker" agents additionally get write + bash tools.
@@ -262,17 +258,12 @@ export function registerSessionBuiltins(host: BuiltinHost): void {
   if (typeof host.config.subagentMaxThreads === "number") task.maxThreads = host.config.subagentMaxThreads;
   if (typeof host.config.subagentMaxTotal === "number") task.maxTotal = host.config.subagentMaxTotal;
   // Background sub-agents (`run: "background"`): a per-session registry so a
-  // dispatched job can be listed / waited / interrupted, and so its one-time
-  // completion summary is steered back to the parent. Shared with the control
-  // tools below, which are built per session (NOT module singletons) so a
-  // concurrent session in the same process cannot cross-wire the registry.
+  // dispatched job can be listed / waited / interrupted via task action=…,
+  // and so its one-time completion summary is steered back to the parent.
   task.backgroundRegistry = host.backgroundSubagents;
   host.backgroundSubagents.onCompletion((meta) => {
     host.deliverBackgroundCompletion(meta);
   });
-  host.toolRegistry.register(makeSubagentListTool(host.backgroundSubagents));
-  host.toolRegistry.register(makeSubagentWaitTool(host.backgroundSubagents));
-  host.toolRegistry.register(makeSubagentInterruptTool(host.backgroundSubagents));
 
   host.wireHookResolvers(task.runner);
 }

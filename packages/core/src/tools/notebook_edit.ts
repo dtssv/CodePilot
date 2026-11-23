@@ -4,11 +4,13 @@
 // JSON back atomically; existing cell IDs are preserved.
 
 import { z } from "zod";
-import { readFile, writeFile, stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join, isAbsolute } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardDeliveryWrite, guardFreshWrite, guardPath } from "./_shared.js";
+import { atomicWriteFile } from "./atomicWrite.js";
+import { withWriteLocks } from "./writeLock.js";
 import { hashFileContent } from "../workspace/fsObservation.js";
 
 // ---------------------------------------------------------------------------
@@ -136,6 +138,7 @@ export const notebookEditTool: ToolDef<typeof schema> = {
     if (delivery) return delivery;
     const path = resolvePath(input.notebook_path, ctx.cwd);
 
+    return withWriteLocks([path], async () => {
     // Cell-index edits are blind without a view of the notebook — require a
     // prior read_file this session, and block if the file went stale since.
     let preStat: { mtimeMs: number; size: number } | null = null;
@@ -221,7 +224,7 @@ export const notebookEditTool: ToolDef<typeof schema> = {
     if (mutated) {
       const serialized = serializeNotebook(nb);
       try {
-        await writeFile(path, serialized, "utf-8");
+        await atomicWriteFile(path, serialized, "utf-8");
       } catch (err) {
         return { content: `Cell edited in memory but failed to write notebook: ${(err as Error).message}`, isError: true };
       }
@@ -239,6 +242,7 @@ export const notebookEditTool: ToolDef<typeof schema> = {
       }
     }
     return { content: resultMsg };
+    });
   },
 };
 

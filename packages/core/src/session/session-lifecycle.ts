@@ -7,7 +7,11 @@ import { AuditLogger } from "../telemetry/audit.js";
 import type { RedactionPattern } from "../permissions/redact.js";
 import type { McpManager } from "../mcp/mcp.js";
 import type { McpServerRequestHandler } from "../mcp/mcp-types.js";
-import { onJobCompletion, readJobLog } from "../tools/bashJobs.js";
+import {
+  onJobCompletion,
+  readJobLog,
+  isJobCompletionSteerSuppressed,
+} from "../tools/bashJobs.js";
 import { StaticSkillStore, type SkillToolHandle } from "../tools/skill.js";
 import { BackgroundSubagentRegistry } from "../tools/index.js";
 import type { ArtifactStore } from "../tools/artifacts.js";
@@ -40,6 +44,8 @@ import { startMcp as startMcpImpl, formatInboundNotification } from "../mcp/sess
 import { acquireSessionLock, type SessionLease } from "./sessionLock.js";
 import { persistSessionCwd } from "./session-utils.js";
 import type { BoundedSinkQueue } from "./sessionSink.js";
+import { loadSessionInbox } from "./session-inbox.js";
+import { emitFollowUp, type SteeringItem } from "./session-steer.js";
 
 export type LifecycleHost = PersistHost & {
   disposed: boolean;
@@ -62,6 +68,8 @@ export type LifecycleHost = PersistHost & {
   listeners: Set<(e: Event) => void>;
   interruptedRecovery?: InterruptedRunInfo;
   followUpQueue: FollowUpItem[];
+  steeringQueue: SteeringItem[];
+  persistInbox(): void;
   backgroundSubagents: BackgroundSubagentRegistry;
   pendingCheckpoint: Promise<void> | null;
   eventSink: BoundedSinkQueue | undefined;
@@ -211,6 +219,7 @@ export async function sessionInitAfterLease(host: LifecycleHost): Promise<void> 
   await sessionStartNetProxyIfConfigured(host);
   sessionRegisterBuiltins(host);
   await host.loadFromDisk();
+  await sessionLoadInbox(host);
   await sessionReconcileStaleStatus(host);
   await persistSessionCwd(host.id, host.cwd).catch(() => undefined);
   host.gitBranchCache = readGitBranch(host.cwd);
@@ -272,6 +281,9 @@ export async function sessionInitAfterLease(host: LifecycleHost): Promise<void> 
   await host.hooks.runSessionStart(source).catch(() => undefined);
   host.jobListeners.push(
     onJobCompletion(host.cwd, (meta) => {
+      // Skip when bash_output already returned terminal status, or bash_kill
+      // initiated the stop — otherwise the same tail is steered again.
+      if (isJobCompletionSteerSuppressed(host.cwd, meta.id)) return;
       const status =
         meta.status === "exited"
           ? `exited with code ${meta.exitCode ?? "?"}`
@@ -285,19 +297,21 @@ export async function sessionInitAfterLease(host: LifecycleHost): Promise<void> 
         meta.status === "failed" ||
         (meta.status === "exited" && meta.exitCode !== 0 && meta.exitCode != null);
       const emit = (tail?: string): void => {
+        if (isJobCompletionSteerSuppressed(host.cwd, meta.id)) return;
         let msg = `Background job ${meta.id} (${shown}) ${status}.`;
-        if (failed && tail && tail.trim()) {
-          msg += `\nLast output:\n${tail.trim().slice(-800)}`;
-        } else {
+        const snippet = tail?.trim();
+        if (snippet) {
+          msg += `\nLast output:\n${snippet.slice(-4096)}`;
+          msg += `\nnext_offset: end (use bash_output with offset to page earlier log)`;
+        } else if (failed) {
           msg += ` Use bash_output({ job_id: "${meta.id}" }) to read its output.`;
+        } else {
+          msg += ` Output attached when available; bash_output({ job_id: "${meta.id}" }) for full log.`;
         }
         host.steerSystem(msg);
       };
-      if (failed) {
-        readJobLog(host.cwd, meta.id, 20).then(emit).catch(() => emit());
-      } else {
-        emit();
-      }
+      // Always try to attach a short tail so the model need not poll.
+      readJobLog(host.cwd, meta.id, 40).then(emit).catch(() => emit());
     }),
   );
   if (host.config.audit) {
@@ -328,9 +342,26 @@ export async function sessionInit(host: LifecycleHost): Promise<void> {
   }
 }
 
+/** Restore pending steers/follow-ups from the inbox sidecar after JSONL load. */
+async function sessionLoadInbox(host: LifecycleHost): Promise<void> {
+  try {
+    const inbox = await loadSessionInbox(host.id);
+    host.steeringQueue = inbox.steering;
+    host.followUpQueue = inbox.followUps;
+    if (inbox.followUps.length > 0) {
+      emitFollowUp(host as never, "queued");
+    }
+  } catch {
+    /* best-effort */
+  }
+}
+
 export async function sessionDispose(host: LifecycleHost): Promise<void> {
   host.disposed = true;
+  // Leave the inbox sidecar on disk — pending steers/follow-ups must survive
+  // process restart / session reopen. Only session delete clears it.
   host.followUpQueue = [];
+  host.steeringQueue = [];
   host.backgroundSubagents.interruptAll();
   await getTracer().flush().catch(() => undefined);
   if (host.pendingCheckpoint) {

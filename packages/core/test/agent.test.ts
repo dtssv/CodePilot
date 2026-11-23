@@ -423,16 +423,24 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  // Graceful wind-down (agent.ts:444-461): the budget is not a hard wall — the
-  // last turns inject a runtime_context nudge urging synthesis, so the model
-  // lands softly instead of being cut off mid-tool-call. These pin the gradient
-  // + its carrier.
-  function systemText(opts: StreamChatOptions): string {
+  // Graceful wind-down: soft nudges ride `<runtime_context>`; the tool-lock
+  // wrap-up is a trailing user message so the cached prefix stays stable.
+  // These pin the gradient + its carriers.
+  function roleText(opts: StreamChatOptions, role: "system" | "user"): string {
     return opts.messages
-      .filter((m) => m.role === "system")
+      .filter((m) => m.role === role)
       .flatMap((m) => m.content)
       .map((b) => (b.type === "text" ? b.text : ""))
       .join("\n");
+  }
+  function systemText(opts: StreamChatOptions): string {
+    return roleText(opts, "system");
+  }
+  function trailingUserText(opts: StreamChatOptions): string {
+    const users = opts.messages.filter((m) => m.role === "user");
+    const last = users[users.length - 1];
+    if (!last) return "";
+    return last.content.map((b) => (b.type === "text" ? b.text : "")).join("\n");
   }
 
   it("injects a graded wind-down nudge on the last two turns (main session)", async () => {
@@ -450,19 +458,22 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
     const deps = {
       ...f.deps(),
       maxTurns: 4,
-      // A minimal system prompt so liveContext (which carries the nudge) is
-      // actually injected as a system message we can inspect.
+      // A minimal system prompt so liveContext (soft nudge) is injected.
       systemPrompt: { staticPrefix: "SYS", volatileSuffix: "<plan></plan>" },
     };
     await runAgent({ history: [], userText: "go" }, deps);
-    // turn 2 (remaining == 2): soft tier-stable "few turns left" nudge (no
-    // per-turn counter — keeps the trailing runtime_context cacheable).
+    // turn 2 (remaining == 2): soft tier-stable "few turns left" nudge still
+    // rides runtime_context (no tool lock yet).
     expect(systemText(provider.calls[2]!)).toMatch(/few turns left in your budget/i);
-    // turn 3 (remaining == 1): hard "do NOT call any more tools, write your
-    // final answer now" nudge.
-    const last = systemText(provider.calls[3]!);
-    expect(last).toMatch(/reached the turn budget for this task/);
-    expect(last).toMatch(/[Dd]o NOT call any more|final answer now/);
+    // turn 3 (remaining == 1): hard wrap-up is a trailing user + toolChoice none
+    // — not stuffed into runtime_context.
+    const locked = provider.calls[3]!;
+    expect(locked.toolChoice).toBe("none");
+    expect(locked.tools?.length ?? 0).toBeGreaterThan(0);
+    const wrapUp = trailingUserText(locked);
+    expect(wrapUp).toMatch(/reached the turn budget for this task/);
+    expect(wrapUp).toMatch(/[Dd]o NOT call any more|final answer now/);
+    expect(systemText(locked)).not.toMatch(/reached the turn budget for this task/);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -484,11 +495,11 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
       systemPrompt: { staticPrefix: "SYS", volatileSuffix: "<plan></plan>" },
     };
     await runAgent({ history: [], userText: "go" }, deps);
-    // The sub-agent variant asks for a structured conclusion, not just "write
-    // your answer" — so the parent's outcome assessment has sections to read.
-    const nudges = provider.calls.map(systemText).join("\n---\n");
-    expect(nudges).toMatch(/Findings/);
-    expect(nudges).toMatch(/Recommendations|Blocker/);
+    // Lock-tier wrap-up is a trailing user so the parent's outcome assessment
+    // still sees the structured section headers.
+    const wrapUps = provider.calls.map(trailingUserText).join("\n---\n");
+    expect(wrapUps).toMatch(/Findings/);
+    expect(wrapUps).toMatch(/Recommendations|Blocker/);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -511,10 +522,10 @@ describe("runAgent maxTurns (unset = unlimited, with convergence backstop)", () 
       systemPrompt: { staticPrefix: "SYS", volatileSuffix: "<plan></plan>" },
     };
     await runAgent({ history: [], userText: "go" }, deps);
-    const nudges = provider.calls.map(systemText).join("\n---\n");
-    expect(nudges).toMatch(/### Plan/);
-    expect(nudges).toMatch(/Critical files|Blocker/);
-    expect(nudges).not.toMatch(/### Findings/);
+    const wrapUps = provider.calls.map(trailingUserText).join("\n---\n");
+    expect(wrapUps).toMatch(/### Plan/);
+    expect(wrapUps).toMatch(/Critical files|Blocker/);
+    expect(wrapUps).not.toMatch(/### Findings/);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1111,9 +1122,10 @@ describe("runAgent (mock provider)", () => {
 
   it.each([
     [["completed", "in_progress"], ["completed", "completed"]],
-    [["in_progress", "pending"], null],
+    // Final-text close: unfinished steps are marked completed at end of run.
+    [["in_progress", "pending"], ["completed", "completed"]],
   ])("closes a finished plan when the run ends (%j)", async (before, after) => {
-    const { planUpdateTool } = await import("../src/tools/plan_update.js");
+    const { planTool } = await import("../src/tools/plan.js");
     const dir = mkdtempSync(join(tmpdir(), "agent-"));
     const provider = new MockProvider();
     const steps = before.map((status, i) => ({ id: String(i + 1), title: `step ${i + 1}`, status }));
@@ -1122,7 +1134,7 @@ describe("runAgent (mock provider)", () => {
         {
           kind: "tool_call",
           messageId: "m1",
-          toolCall: { type: "tool_use", id: "p1", name: "plan_update", input: { steps } },
+          toolCall: { type: "tool_use", id: "p1", name: "plan", input: { action: "update", steps } },
         },
         { kind: "done", finishReason: "tool_use" },
       ],
@@ -1133,12 +1145,12 @@ describe("runAgent (mock provider)", () => {
     ];
     const f = makeDeps(dir, provider);
     const deps = f.deps();
-    deps.tools.register(planUpdateTool);
+    deps.tools.register(planTool);
     const r = await runAgent({ history: [], userText: "go" }, deps);
     const plans = r.events.filter((e): e is Extract<Event, { type: "plan" }> => e.type === "plan");
     const last = plans[plans.length - 1]!;
-    expect(last.steps.map((s) => s.status)).toEqual(after ?? before);
-    expect(plans).toHaveLength(after ? 2 : 1);
+    expect(last.steps.map((s) => s.status)).toEqual(after);
+    expect(plans).toHaveLength(2);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1355,27 +1367,27 @@ describe("runAgent plan-only turns", () => {
   const planCall = (id: string): StreamEvent => ({
     kind: "tool_call",
     messageId: id,
-    toolCall: { type: "tool_use", id, name: "plan_update", input: { x: "" } },
+    toolCall: { type: "tool_use", id, name: "plan", input: { x: "" } },
   });
   const finish: StreamEvent[] = [
     { kind: "text_delta", messageId: "m9", text: "done" },
     { kind: "done", finishReason: "stop" },
   ];
 
-  it("nudges the model when a response carries nothing but plan_update", async () => {
+  it("nudges the model when a response carries nothing but plan", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-"));
     const provider = new MockProvider();
     provider.responses = [[planCall("p1"), { kind: "done", finishReason: "tool_use" }], finish];
     const f = makeDeps(dir, provider);
     const deps = f.deps();
-    deps.tools.register(makeTool("plan_update", "read", "plan saved"));
+    deps.tools.register(makeTool("plan", "read", "plan saved"));
     const r = await runAgent({ history: [], userText: "go" }, deps);
     const res = r.events.find((e) => e.type === "tool_result");
     expect(res && res.type === "tool_result" && res.content).toMatch(/^plan saved\n\nNote: .*same response/s);
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("leaves plan_update alone when it is batched with real work", async () => {
+  it("leaves plan alone when it is batched with real work", async () => {
     const dir = mkdtempSync(join(tmpdir(), "agent-"));
     const provider = new MockProvider();
     provider.responses = [
@@ -1388,9 +1400,9 @@ describe("runAgent plan-only turns", () => {
     ];
     const f = makeDeps(dir, provider);
     const deps = f.deps();
-    deps.tools.register(makeTool("plan_update", "read", "plan saved"));
+    deps.tools.register(makeTool("plan", "read", "plan saved"));
     const r = await runAgent({ history: [], userText: "go" }, deps);
-    const res = r.events.find((e) => e.type === "tool_result" && e.name === "plan_update");
+    const res = r.events.find((e) => e.type === "tool_result" && e.name === "plan");
     expect(res && res.type === "tool_result" && res.content).toBe("plan saved");
     rmSync(dir, { recursive: true, force: true });
   });
@@ -1471,7 +1483,7 @@ describe("soft-stop resume (empty / unfinished plan)", () => {
   });
 
   it("soft-continues once when plan is unfinished and reply looks incomplete", async () => {
-    const { planUpdateTool } = await import("../src/tools/plan_update.js");
+    const { planTool } = await import("../src/tools/plan.js");
     const dir = mkdtempSync(join(tmpdir(), "agent-"));
     const provider = new MockProvider();
     const steps = [
@@ -1483,7 +1495,7 @@ describe("soft-stop resume (empty / unfinished plan)", () => {
         {
           kind: "tool_call",
           messageId: "m1",
-          toolCall: { type: "tool_use", id: "p1", name: "plan_update", input: { steps } },
+          toolCall: { type: "tool_use", id: "p1", name: "plan", input: { action: "update", steps } },
         },
         { kind: "done", finishReason: "tool_use" },
       ],
@@ -1498,7 +1510,7 @@ describe("soft-stop resume (empty / unfinished plan)", () => {
     ];
     const f = makeDeps(dir, provider);
     const deps = f.deps();
-    deps.tools.register(planUpdateTool);
+    deps.tools.register(planTool);
     const r = await runAgent({ history: [], userText: "go" }, deps);
     expect(provider.calls.length).toBe(3);
     const soft = provider.calls[2]!.messages
@@ -1510,7 +1522,7 @@ describe("soft-stop resume (empty / unfinished plan)", () => {
   });
 
   it("does not soft-continue when the assistant asks the user a question", async () => {
-    const { planUpdateTool } = await import("../src/tools/plan_update.js");
+    const { planTool } = await import("../src/tools/plan.js");
     const dir = mkdtempSync(join(tmpdir(), "agent-"));
     const provider = new MockProvider();
     const steps = [
@@ -1522,7 +1534,7 @@ describe("soft-stop resume (empty / unfinished plan)", () => {
         {
           kind: "tool_call",
           messageId: "m1",
-          toolCall: { type: "tool_use", id: "p1", name: "plan_update", input: { steps } },
+          toolCall: { type: "tool_use", id: "p1", name: "plan", input: { action: "update", steps } },
         },
         { kind: "done", finishReason: "tool_use" },
       ],
@@ -1537,7 +1549,7 @@ describe("soft-stop resume (empty / unfinished plan)", () => {
     ];
     const f = makeDeps(dir, provider);
     const deps = f.deps();
-    deps.tools.register(planUpdateTool);
+    deps.tools.register(planTool);
     const r = await runAgent({ history: [], userText: "go" }, deps);
     expect(provider.calls.length).toBe(2);
     expect(r.finalText).toMatch(/should I use headless/);

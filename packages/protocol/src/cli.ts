@@ -5,7 +5,7 @@
  * JSON-RPC protocol server.
  */
 
-import { startSelfUpdateWatcher } from "@codepilot/core";
+import { installProcessGuards, startSelfUpdateWatcher } from "@codepilot/core";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, helpText } from "./cli/args.js";
@@ -15,6 +15,7 @@ import { cmdRun, cmdGoal, cmdRepl, cmdAgent } from "./cli/run.js";
 import { cmdUpdate, cmdExport, cmdAcp } from "./cli/update.js";
 
 export async function runProtocolCli(rawArgv?: readonly string[]): Promise<number> {
+  installProcessGuards();
   const argv = rawArgv ? [...rawArgv] : process.argv.slice(2);
   if (argv.includes("--help") || argv.includes("-h")) {
     process.stdout.write(helpText() + "\n");

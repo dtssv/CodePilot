@@ -1,6 +1,6 @@
-import { readFile, rm, mkdir, mkdtemp } from "node:fs/promises";
+import { readFile, writeFile, rm, mkdir, mkdtemp, cp, rename } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join, isAbsolute, resolve } from "node:path";
+import { join, isAbsolute, resolve, dirname } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -10,15 +10,30 @@ import type { InstallOptions, PluginCapabilityReport, PluginManifest } from "./t
 
 const execFileAsync = promisify(execFile);
 
+/** Sidecar written next to plugin.json at install time. */
+export interface PluginInstallMeta {
+  source: string;
+  commit?: string;
+  installedAt: string;
+}
+
 /**
  * Install a plugin from a git URL (cloned) or local path (copied). A `#subdir`
  * fragment selects a monorepo sub-directory. Returns the installed path.
  * Throws if it exists (unless `force`) or has no `plugin.json`.
+ *
+ * Requires `opts.consent === true` so hosts cannot silently write a trust hash
+ * without an explicit install confirmation.
  */
 export async function installPlugin(
   source: string,
   opts: InstallOptions = {}
 ): Promise<string> {
+  if (opts.consent !== true) {
+    throw new Error(
+      "installPlugin requires consent: true (confirm after inspectPluginSource)",
+    );
+  }
   const name = derivePluginName(source);
   const target = opts.installDir ?? join(homedir(), ".codepilot", "plugins", name);
   if (existsSync(target)) {
@@ -29,7 +44,14 @@ export async function installPlugin(
   }
   await mkdir(join(homedir(), ".codepilot", "plugins"), { recursive: true });
 
-  await fetchPluginInto(source, target);
+  let commit: string | undefined;
+  try {
+    commit = await fetchPluginInto(source, target);
+  } catch (err) {
+    // Never leave a half-written install directory.
+    await rm(target, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
 
  // Verify the manifest exists.
   const manifestPath = join(target, "plugin.json");
@@ -37,15 +59,24 @@ export async function installPlugin(
     await rm(target, { recursive: true, force: true });
     throw new Error(`installed source has no plugin.json — not a valid plugin`);
   }
- // Record the sensitive-content fingerprint at install-consent time. Reaching
- // here means the caller consented (after inspectPluginSource). A later on-disk
- // change to the plugin's hooks / MCP servers / runtime will no longer match
- // this hash, and mergePluginConfig skips those components until the user
- // re-confirms. Best-effort: a trust-file write failure must not fail install.
+
+  // Install origin metadata (best-effort).
+  try {
+    const meta: PluginInstallMeta = {
+      source,
+      installedAt: new Date().toISOString(),
+      ...(commit ? { commit } : {}),
+    };
+    await writeFile(join(target, ".install.json"), JSON.stringify(meta, null, 2), "utf-8");
+  } catch {
+    /* non-fatal */
+  }
+
+ // Record the sensitive-content fingerprint at install-consent time.
   try {
     const manifest = JSON.parse(await readFile(manifestPath, "utf-8")) as PluginManifest;
     const store = opts.trustStore ?? new PluginTrustStore();
-    await store.record(manifest.name, pluginContentHash(manifest));
+    await store.record(manifest.name, pluginContentHash(manifest, target));
   } catch {
  /* non-fatal: content trust is defence-in-depth, not install-critical */
   }
@@ -54,45 +85,52 @@ export async function installPlugin(
 
 /**
  * Fetch a plugin source (git URL or local path, honouring a `#subdir`
- * monorepo fragment) into `target`. Shared by {@link installPlugin} and
- * {@link inspectPluginSource}. Does not verify the manifest — the caller does.
+ * monorepo fragment) into `target`. Returns a git commit SHA when available.
+ * Shared by {@link installPlugin} and {@link inspectPluginSource}.
  */
-async function fetchPluginInto(source: string, target: string): Promise<void> {
+async function fetchPluginInto(source: string, target: string): Promise<string | undefined> {
   // Split off an optional `#subdir` monorepo fragment.
   const hash = source.indexOf("#");
   const bare = hash >= 0 ? source.slice(0, hash) : source;
   const subdir = hash >= 0 ? source.slice(hash + 1).replace(/^\/+|\/+$/g, "") : "";
 
   if (bare.startsWith("http://") || bare.startsWith("https://") || bare.startsWith("git@")) {
-    if (subdir) {
-      // Clone the whole repo to a temp dir, then copy only the sub-directory.
-      const tmp = await mkdtemp(join(tmpdir(), "codepilot-plugin-"));
+    // Always clone to tmp then promote — never leave a partial `target` on failure.
+    const tmp = await mkdtemp(join(tmpdir(), "codepilot-plugin-"));
+    try {
+      await execFileAsync("git", ["clone", "--depth", "1", bare, tmp]);
+      let commit: string | undefined;
       try {
-        await execFileAsync("git", ["clone", "--depth", "1", bare, tmp]);
-        const picked = join(tmp, subdir);
-        if (!existsSync(picked)) {
-          throw new Error(`sub-directory not found in repo: ${subdir}`);
-        }
+        const { stdout } = await execFileAsync("git", ["-C", tmp, "rev-parse", "HEAD"]);
+        commit = stdout.trim() || undefined;
+      } catch {
+        commit = undefined;
+      }
+      const picked = subdir ? join(tmp, subdir) : tmp;
+      if (subdir && !existsSync(picked)) {
+        throw new Error(`sub-directory not found in repo: ${subdir}`);
+      }
+      await mkdir(dirname(target), { recursive: true });
+      // Prefer rename (atomic on same FS); fall back to recursive copy.
+      try {
+        await rename(picked, target);
+      } catch {
         await mkdir(target, { recursive: true });
-        await execFileAsync("cp", ["-R", `${picked}/.`, target]);
-      } finally {
-        await rm(tmp, { recursive: true, force: true });
+        await cp(picked, target, { recursive: true });
       }
-    } else {
-      const { stdout, stderr } = await execFileAsync("git", ["clone", "--depth", "1", bare, target]);
-      if (stderr && !stdout) {
-        // git writes progress to stderr; only throw on actual errors
-      }
+      return commit;
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
     }
-  } else {
-    // Local directory copy (honours a `#subdir` fragment too).
-    const root = isAbsolute(bare) ? bare : resolve(process.cwd(), bare);
-    const src = subdir ? join(root, subdir) : root;
-    if (!existsSync(src)) throw new Error(`source not found: ${src}`);
-    await mkdir(target, { recursive: true });
-    const { stdout } = await execFileAsync("cp", ["-R", `${src}/.`, target]);
-    void stdout;
   }
+
+  // Local directory copy (honours a `#subdir` fragment too).
+  const root = isAbsolute(bare) ? bare : resolve(process.cwd(), bare);
+  const src = subdir ? join(root, subdir) : root;
+  if (!existsSync(src)) throw new Error(`source not found: ${src}`);
+  await mkdir(target, { recursive: true });
+  await cp(src, target, { recursive: true });
+  return undefined;
 }
 
 /**

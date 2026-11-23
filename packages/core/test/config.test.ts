@@ -605,7 +605,7 @@ describe("useProvider", () => {
       providers: {
         oc: {
           provider: "openai" as const,
-          baseURL: "https://opencode.example/inference/openai/v1",
+          baseURL: "https://gateway.example/inference/openai/v1",
           apiKey: "k",
           model: "gpt-x",
           apiStyle: "responses" as const,

@@ -81,7 +81,7 @@ export function SessionList({
 }
 
 /** One session row in the workspace nav, with a hover ··· menu for
- * pin/archive. Pinned rows show a ★ marker. */
+ * pin/archive. Pinned rows show a ★ marker. Right-click opens the same actions. */
 export function SessionRow({
   s,
   active,
@@ -92,6 +92,7 @@ export function SessionRow({
   onPin,
   onArchive,
   onUnarchive,
+  onContextMenu,
 }: {
   s: SessionSummary;
   ws: string;
@@ -103,6 +104,7 @@ export function SessionRow({
   onPin?(): void;
   onArchive?(): void;
   onUnarchive?(): void;
+  onContextMenu?(e: React.MouseEvent): void;
 }): React.ReactElement {
   const hasMenu = !!(onPin || onArchive || onUnarchive);
   return (
@@ -112,6 +114,7 @@ export function SessionRow({
           ? "bg-[var(--color-surface-hover)] text-[var(--color-ink)]"
           : "text-[var(--color-ink-dim)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
       }`}
+      onContextMenu={onContextMenu}
     >
       <button
         type="button"

@@ -16,7 +16,7 @@ export function defaultCapabilities(): InitializeResult["capabilities"] {
       "glob",
       "grep",
       "ls",
-      "plan_update",
+      "plan",
       "memory_write",
       "task",
       "read_artifact",

@@ -160,7 +160,7 @@ export function buildProgressLedger(events: Event[]): string {
   }
   const rows = new Map<string, { count: number; ok: number; failed: number }>();
   for (const e of events) {
-    if (e.type !== "tool_call" || e.name === "plan_update") continue;
+    if (e.type !== "tool_call" || e.name === "plan") continue;
     const r = results.get(e.id);
     if (!r) continue;
     const key = describeCall(e.name, e.input);

@@ -34,6 +34,8 @@ import type { Span } from "../telemetry/telemetry.js";
 export interface AgentDeps {
   provider: ChatProvider;
   tools: ToolRegistry;
+  /** Tool names already sent on the wire; kept sticky across mode/lazy flips. */
+  advertisedToolNames?: Set<string>;
   artifacts: ArtifactStore;
   permissions: PermissionEngine;
   config: CodepilotConfig;
@@ -76,6 +78,11 @@ export interface AgentDeps {
    * event list and return the new live transcript (or `null` if unchanged).
    */
   compactNow?: () => Promise<Event[] | null>;
+  /**
+   * Mid-run durable prune of old tool_result bodies. Returns the updated live
+   * transcript when stubs were persisted, otherwise null.
+   */
+  pruneNow?: () => Promise<Event[] | null>;
 /**
   * Register a prompt-cache warm candidate at a normal turn end: `replay`
   * re-sends the exact request with a 1-token output cap. The session decides
@@ -191,6 +198,9 @@ export interface AgentDeps {
    * does not re-send an already-oversize transcript.
    */
   lastProviderInputTokens?: number;
+  /** Freeze map for folded tool_result stubs (toolCallId → stub text) so the
+   * wording — and the prompt-cache prefix — stays stable across turns. */
+  foldedToolResultStubs?: Map<string, string>;
   /**
    * Session-scoped file-observation store (staleness guard after reads).
    * When supplied, read_file records observations and write/edit tools assert

@@ -11,6 +11,7 @@ import {
   type TouchedFile,
 } from "../state/selectors.js";
 import { t } from "../i18n.js";
+import { formatInput } from "./transcript/Steps.js";
 import { FileIcon, ListIcon, XIcon } from "./Icons.js";
 
 /**
@@ -204,12 +205,13 @@ function buildSteps(rows: Row[]): Step[] {
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
     if (row.kind === "message" && row.msg.role === "user") {
-      lastUserAt = row.at;
+      // Steers are mid-run corrections — keep TTFT anchored to the real prompt.
+      if (!row.msg.steer) lastUserAt = row.at;
       steps.push({
         kind: "user",
         id: `user-${row.msg.id}`,
         at: row.at,
-        text: row.msg.text,
+        text: row.msg.steer ? `[inject] ${row.msg.text}` : row.msg.text,
       });
     } else if (row.kind === "message" && row.msg.role === "assistant") {
       steps.push({
@@ -416,7 +418,7 @@ function StepCard({ step, index }: { step: Step; index: number }): React.ReactEl
 
 function ToolStep({ index, tool, at }: { index: number; tool: ToolRow; at: number }): React.ReactElement {
   const [showResult, setShowResult] = useState(false);
-  const target = toolTarget(tool.input);
+  const target = toolTarget(tool.input, tool.name);
   const cmd =
     tool.name === "bash" || tool.name === "shell" || tool.name === "run_command"
       ? extractCommand(tool.input)
@@ -425,6 +427,8 @@ function ToolStep({ index, tool, at }: { index: number; tool: ToolRow; at: numbe
     tool.startedAt && tool.finishedAt ? tool.finishedAt - tool.startedAt : undefined;
   const tone =
     tool.status === "error" ? "error" : tool.status === "running" ? "running" : "ok";
+  // Errors always show their message; success results stay behind a toggle.
+  const resultOpen = tool.status === "error" || showResult;
 
   return (
     <Block
@@ -445,23 +449,36 @@ function ToolStep({ index, tool, at }: { index: number; tool: ToolRow; at: numbe
             {t("Input")}
           </summary>
           <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap font-mono text-[10.5px] text-[var(--color-ink-dim)]">
-            {safeJson(tool.input)}
+            {formatInput(tool.input)}
           </pre>
         </details>
       )}
       {tool.result !== undefined && (
         <div className="mt-1">
-          <button
-            type="button"
-            className="text-[10.5px] text-[var(--color-accent)] hover:underline"
-            onClick={() => setShowResult((v) => !v)}
-          >
-            {showResult ? t("Hide result") : t("Show result")}
-            {` (${tool.result.length} chars)`}
-          </button>
-          {showResult && (
-            <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-md bg-[var(--color-bg)] p-1.5 font-mono text-[10.5px] text-[var(--color-ink-dim)]">
-              {tool.result}
+          {tool.status !== "error" && (
+            <button
+              type="button"
+              className="text-[10.5px] text-[var(--color-accent)] hover:underline"
+              onClick={() => setShowResult((v) => !v)}
+            >
+              {showResult ? t("Hide result") : t("Show result")}
+              {` (${tool.result.length} chars)`}
+            </button>
+          )}
+          {tool.status === "error" && (
+            <div className="mb-0.5 text-[10px] font-semibold tracking-wide text-[var(--color-remove)] uppercase">
+              {t("error")}
+            </div>
+          )}
+          {resultOpen && (
+            <pre
+              className={`mt-1 max-h-40 overflow-auto whitespace-pre-wrap rounded-md p-1.5 font-mono text-[10.5px] ${
+                tool.status === "error"
+                  ? "bg-[var(--color-remove-dim)] text-[var(--color-remove)]"
+                  : "bg-[var(--color-bg)] text-[var(--color-ink-dim)]"
+              }`}
+            >
+              {tool.result || "(no output)"}
             </pre>
           )}
         </div>

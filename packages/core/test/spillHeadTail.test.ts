@@ -51,6 +51,17 @@ describe("spillHeadTail", () => {
     expect(r.content.length).toBeLessThan(body.length);
   });
 
+  it("default head+tail just over threshold is shorter than the original", async () => {
+    const { ctx } = captureCtx();
+    // Regression: when threshold == head+tail, a tiny overflow produced a
+    // longer inline view (2000+marker+2000) than the input.
+    const body = "x".repeat(ARTIFACT_THRESHOLD + 1);
+    const r = await spillHeadTail(ctx, body, "hint");
+    expect(r.artifactRef).toBeTruthy();
+    expect(r.content.length).toBeLessThan(body.length);
+    expect(r.content).toContain("chars omitted");
+  });
+
   it("degenerate guard: when head+tail would cover the whole body, returns it verbatim with the ref", async () => {
     const { ctx, store } = captureCtx();
     // Over threshold so it spills, but head+tail windows exceed the length →

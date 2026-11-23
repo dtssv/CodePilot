@@ -48,6 +48,16 @@ describe("isParallelSafeTool", () => {
   });
 });
 
+describe("bash concurrencySafe", () => {
+  it("treats read-only git status as parallel-safe", async () => {
+    const { bashTool } = await import("../src/tools/bash.js");
+    expect(bashTool.concurrencySafe?.({ command: "git status" })).toBe(true);
+    expect(bashTool.concurrencySafe?.({ command: "git diff --stat" })).toBe(true);
+    expect(bashTool.concurrencySafe?.({ command: "rm -rf /" })).toBe(false);
+    expect(bashTool.concurrencySafe?.({ command: "npm install" })).toBe(false);
+  });
+});
+
 describe("runToolsWithBarrier", () => {
   it("runs a batch of adjacent read-only calls concurrently", async () => {
     const calls: Call[] = [

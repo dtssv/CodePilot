@@ -291,7 +291,13 @@ export class RemoteSession {
 
  // Reverse requests from the server → the TUI's bridges.
     peer.onRequest("permission/request", async (p: unknown) => {
-      const req = p as { requestId: string; toolName: string; input: unknown; reason: string };
+      const req = p as {
+        requestId: string;
+        toolName: string;
+        input: unknown;
+        reason: string;
+        preview?: string;
+      };
       const resolution = await opts.onPermissionRequest(req);
       // Flatten a decline-with-feedback / abort object onto the wire shape the
       // server's `permission/respond` understands ({ decision, feedback }).

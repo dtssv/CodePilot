@@ -1,7 +1,6 @@
 package com.codepilot.idea
 
 import com.intellij.openapi.diagnostic.logger
-import java.io.File
 import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.WebSocket
@@ -12,7 +11,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * Shared-daemon LineEngine: attach to `~/.codepilot/serve.json` over WebSocket,
- * or spawn the bundled / PATH `codepilot serve --daemon` and then attach.
+ * or orphan-spawn the bundled / PATH `codepilot serve --daemon` then attach.
  *
  * Falls back to [EngineProcess] stdio when [engineMode] is `"stdio"`.
  */
@@ -29,7 +28,6 @@ class SharedEngineProcess(
     private val log = logger<SharedEngineProcess>()
     private var stdio: EngineProcess? = null
     private var ws: WebSocket? = null
-    private var ownedDaemon: Process? = null
     private val pending = CopyOnWriteArrayList<String>()
     @Volatile private var connecting = false
 
@@ -50,7 +48,8 @@ class SharedEngineProcess(
             try {
                 var info = ServeDiscovery.readLive()
                 if (info == null) {
-                    ownedDaemon = spawnDaemon()
+                    // Orphan spawn — daemon must not stay a child of IDEA.
+                    OrphanDaemon.spawn(daemonCommand(), workingDir(), env())
                     info = ServeDiscovery.waitLive(15_000)
                         ?: throw IllegalStateException(
                             "daemon did not publish ~/.codepilot/serve.json after starting `${daemonCommand().joinToString(" ")}`",
@@ -90,27 +89,8 @@ class SharedEngineProcess(
         stdio = null
         val socket = synchronized(this) { ws.also { ws = null } }
         socket?.let { runCatching { it.sendClose(WebSocket.NORMAL_CLOSURE, "stop") } }
-        // Do not kill ownedDaemon — other clients may share it; idle grace exits it.
-        ownedDaemon = null
+        // Shared daemon is orphaned — other clients may still use it; idle grace exits it.
         onExit("engine stopped")
-    }
-
-    private fun spawnDaemon(): Process {
-        val cmd = daemonCommand()
-        val pb = ProcessBuilder(cmd).directory(File(workingDir()))
-        pb.environment().putAll(env())
-        pb.redirectErrorStream(false)
-        val p = try {
-            pb.start()
-        } catch (e: Exception) {
-            throw IllegalStateException("could not start `${cmd.firstOrNull()}`: ${e.message}", e)
-        }
-        Thread({
-            p.errorStream.bufferedReader().useLines { lines ->
-                lines.forEach { onStderr(it) }
-            }
-        }, "codepilot-daemon-err").apply { isDaemon = true }.start()
-        return p
     }
 
     private fun connectWs(info: ServeInfo) {

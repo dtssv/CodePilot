@@ -37,7 +37,8 @@ export function sanitizeTitle(raw: string): string | null {
   if (
     /^(we need|let me|i need|i'?ll|i will|the user|title only|according to|here is|here'?s|sure|okay|ok\b)/i.test(t) ||
     /^(用户|我需要|我来|我们需要|我会|根据|让我|首先|好的|标题[:：])/.test(t) ||
-    /^(?:\/|~\/|[A-Za-z]:[\\/]|Users\/|home\/|\.{1,2}\/)/.test(t)
+    /^(?:\/|~\/|[A-Za-z]:[\\/]|Users\/|home\/|\.{1,2}\/)/.test(t) ||
+    isWeakTitleSource(t)
   ) {
     return null;
   }
@@ -52,14 +53,39 @@ export function sanitizeTitle(raw: string): string | null {
   return t;
 }
 
+/** Short acks / "continue" nudges must never become the title — they overwrite
+ * a real first-prompt title when the late refresh re-derives it. */
+export function isWeakTitleSource(text: string): boolean {
+  const t = stripTags(text).replace(/\s+/g, " ").trim();
+  if (!t) return true;
+  if (t.length <= 2) return true;
+  return /^(继续|續行|續|下一步|接着|接著|再来|再來|go on|continue|cont\.?|next|ok|okay|yes|y|好的?|行|嗯+|哦+|hai|please continue)[.!?。！？…]*$/i.test(
+    t,
+  );
+}
+
 export function deriveTitleFromText(text: string): string {
  // Drop tool-call markup and tags before deriving a fallback, so the
  // deterministic path can't leak `</arg_value>`-style fragments either.
   const clean = stripTags(text).replace(/\s+/g, " ").trim();
   if (!clean) return "(untitled)";
+  if (isWeakTitleSource(clean)) return "(untitled)";
  // Prefer the first sentence.
   const firstSentence = clean.split(/[.?!。？！\n]/)[0] ?? clean;
   return firstSentence.slice(0, 60);
+}
+
+/** First user-visible prompt text in a transcript (skips weak nudges). */
+export function firstTitleWorthyUserText(events: readonly Event[]): string | undefined {
+  for (const e of events) {
+    if (e.type !== "message" || e.role !== "user") continue;
+    const first = e.content.find((b) => b.type === "text");
+    if (!first || first.type !== "text") continue;
+    const text = first.text.trim();
+    if (!text || isWeakTitleSource(text)) continue;
+    return text;
+  }
+  return undefined;
 }
 
 /** Does the first user message look like a pasted handoff / tool-call dump
@@ -132,6 +158,9 @@ export async function extractTitleAndMeta(
             if (first && first.type === "text") firstUserText = first.text;
           }
           if (e.role === "assistant" && e.model) model = e.model;
+        } else if (e.type === "model" && e.model) {
+          // Explicit model-change events win over assistant message.model.
+          model = e.model;
         } else if (e.type === "mode") {
           mode = e.mode;
         }

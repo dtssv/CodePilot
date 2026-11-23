@@ -89,6 +89,24 @@ export function formatMcp(s: McpSummary): string {
     }
     if (s.tools.length > 50) lines.push(`  … and ${s.tools.length - 50} more`);
   }
+  if (s.prompts.length > 0) {
+    lines.push("");
+    lines.push(`Prompts (${s.prompts.length}) — slash /mcp__<server>__<name>:`);
+    for (const p of s.prompts.slice(0, 50)) {
+      const desc = p.description ? ` — ${p.description.split("\n")[0]!.slice(0, 60)}` : "";
+      lines.push(`  mcp__${p.server}__${p.name}${desc}`);
+    }
+    if (s.prompts.length > 50) lines.push(`  … and ${s.prompts.length - 50} more`);
+  }
+  if (s.resources.length > 0) {
+    lines.push("");
+    lines.push(`Resources (${s.resources.length}) — @mcp:<server>/<uri>:`);
+    for (const r of s.resources.slice(0, 50)) {
+      const label = r.name && r.name !== r.uri ? `${r.name} (${r.uri})` : r.uri;
+      lines.push(`  ${r.server}/${label}`);
+    }
+    if (s.resources.length > 50) lines.push(`  … and ${s.resources.length - 50} more`);
+  }
   return lines.join("\n");
 }
 

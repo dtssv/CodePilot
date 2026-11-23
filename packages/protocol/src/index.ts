@@ -24,7 +24,12 @@ export {
 export {
   waitForLiveServeInfo,
   discoverOrSpawnDaemon,
+  spawnOrphanDaemon,
+  buildOrphanLaunch,
+  shellQuoteUnix,
+  shellQuoteWin,
   type DiscoverOrSpawnOptions,
   type DiscoverOrSpawnResult,
+  type OrphanSpawnOptions,
   type Spawner as DaemonSpawner,
 } from "./engineConnect.js";

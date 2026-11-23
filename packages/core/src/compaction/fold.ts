@@ -21,10 +21,18 @@ export interface FoldOptions {
  * (file reads are the model's working memory; bash/grep/glob outputs summarise
  * well). */
   deferTools?: ReadonlySet<string>;
+  /** Freeze map: once folded, reuse the same stub text so the prefix does not
+   * churn. */
+  stubMemo?: Map<string, string>;
 }
 
 /** Default defer list: reads stay verbatim until nothing else is left. */
 export const FOLD_DEFER_TOOLS: ReadonlySet<string> = new Set(["read_file", "read_artifact"]);
+
+/** Suggested window when an operator opts into count-based fold via
+ * `maxToolResultsInContext`. Not applied by default: a tight cap rewrites
+ * mid-history every turn and pins cache hits near ~60%. */
+export const DEFAULT_MAX_TOOL_RESULTS_IN_CONTEXT = 6;
 
 /** Pure pass that folds old tool_result content into a short stub + summary. */
 export function foldToolResults(
@@ -37,6 +45,7 @@ export function foldToolResults(
  // a re-read. The fold-for-budget escalation path lowers this when needed.
   const minChars = options.minChars ?? 1200;
   const defer = options.deferTools ?? FOLD_DEFER_TOOLS;
+  const stubMemo = options.stubMemo;
   const cutoff = findCutoff(events, keep);
   let folded = 0;
  // Pass 1: fold everything except deferred tools. Pass 2 (only when nothing
@@ -49,7 +58,10 @@ export function foldToolResults(
     (allowDeferred || !defer.has(e.name));
   const foldAt = (e: Event & { type: "tool_result" }) => {
     folded++;
-    return { ...e, content: summariseToolResult(e), artifactRef: e.artifactRef ?? undefined };
+    const frozen = stubMemo?.get(e.toolCallId);
+    const content = frozen ?? summariseToolResult(e);
+    if (stubMemo && !frozen) stubMemo.set(e.toolCallId, content);
+    return { ...e, content, artifactRef: e.artifactRef ?? undefined };
   };
   let out = events.map((e, idx) => {
     if (idx >= cutoff || !eligible(e, false)) return e;
@@ -96,6 +108,11 @@ function foldRollingWindow(
   return events.map((e, idx) =>
     toFold.has(idx) ? foldAt(e as Event & { type: "tool_result" }) : e,
   );
+}
+
+/** Build the short stub that replaces a full tool_result body in the model view. */
+export function buildToolResultStub(e: Event & { type: "tool_result" }): string {
+  return summariseToolResult(e);
 }
 
 function summariseToolResult(e: Event & { type: "tool_result" }): string {

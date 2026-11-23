@@ -8,8 +8,11 @@ import {
   extractPlan,
   liveTranscript,
   compactionGeometry,
+  midRunCompactPressure,
+  serializeEventsForSummary,
   DEFAULT_COMPACTION_FRACTION,
   SOFT_COMPACTION_RATIO,
+  PROVIDER_INPUT_COMPACTION_RATIO,
 } from "../src/compaction/compaction.js";
 import type { Event, ToolResultBlock } from "../src/types.js";
 import type { ChatProvider } from "../src/providers/types.js";
@@ -88,6 +91,57 @@ describe("foldToolResults", () => {
     const events = makeEvents().slice(0, 2);
     const { foldedCount } = foldToolResults(events, { keepRecentMessages: 8 });
     expect(foldedCount).toBe(0);
+  });
+
+  it("stubMemo freezes folded wording across turns for prompt-cache stability", () => {
+    const events: Event[] = [];
+    for (let i = 0; i < 12; i++) {
+      events.push({
+        type: "message",
+        id: `u${i}`,
+        role: "user",
+        content: [{ type: "text", text: "p" + i }],
+      });
+      events.push({
+        type: "message",
+        id: `a${i}`,
+        role: "assistant",
+        content: [{ type: "tool_use", id: `tc${i}`, name: "bash", input: { command: "ls" } }],
+      });
+      events.push({
+        type: "tool_result",
+        toolCallId: `tc${i}`,
+        name: "bash",
+        content: "payload-" + i + "-".repeat(200),
+      });
+    }
+    const memo = new Map<string, string>();
+    const first = foldToolResults(events, {
+      keepRecentMessages: 4,
+      maxUnfoldedToolResults: 3,
+      stubMemo: memo,
+    });
+    const firstFolded = first.events.filter(
+      (e): e is Event & { type: "tool_result" } =>
+        e.type === "tool_result" && e.content.startsWith("[folded tool_result"),
+    );
+    expect(firstFolded.length).toBeGreaterThan(0);
+    expect(memo.size).toBe(firstFolded.length);
+    // Poison the memo entry for the oldest folded id — a second fold must
+    // reuse the frozen stub, not re-summarise from the full body.
+    const oldestId = firstFolded[0]!.toolCallId;
+    const frozen = memo.get(oldestId)!;
+    memo.set(oldestId, frozen + "\nFROZEN");
+    const second = foldToolResults(events, {
+      keepRecentMessages: 4,
+      maxUnfoldedToolResults: 3,
+      stubMemo: memo,
+    });
+    const again = second.events.find(
+      (e): e is Event & { type: "tool_result" } =>
+        e.type === "tool_result" && e.toolCallId === oldestId,
+    );
+    expect(again?.content).toBe(frozen + "\nFROZEN");
   });
 
   it("rolling window folds numerous small old results the size gate would skip", () => {
@@ -379,7 +433,9 @@ describe("trimEventsToBudget", () => {
     expect(after).toBeLessThanOrEqual(2_000);
     expect(after).toBeLessThan(before * 0.4);
     const handoff = trimmed.find((e) => e.type === "compaction");
-    expect(handoff && handoff.type === "compaction" ? handoff.summary : "").toMatch(/HANDOFF|USER REQUESTS/);
+    expect(handoff && handoff.type === "compaction" ? handoff.summary : "").toMatch(
+      /## Goals|HANDOFF|## Done|## Pending|## Current/,
+    );
   });
 
   it("preserves plan + last user request in a semantic handoff", () => {
@@ -450,7 +506,9 @@ describe("trimEventsToBudget", () => {
       text: "Keep going on wire physics — do not restart",
     });
     const handoff = trimmed.find((e) => e.type === "compaction");
-    expect(handoff && handoff.type === "compaction" ? handoff.summary : "").toMatch(/USER REQUESTS|HANDOFF|KEY FILES|CURRENT STATE/);
+    expect(handoff && handoff.type === "compaction" ? handoff.summary : "").toMatch(
+      /## Goals|## Done|## Pending|## Current|## Critical|HANDOFF/,
+    );
   });
 
   it("does not truncate the latest user message when shrinking payloads", () => {
@@ -588,6 +646,29 @@ describe("estimateEventTokens", () => {
     );
     expect(tokens).toBeGreaterThan(0);
   });
+
+  it("excludes reasoning (not sent to the provider)", () => {
+    const est = (s: string) => Math.ceil(s.length / 4);
+    const textOnly = estimateEventTokens(
+      [{ type: "message", id: "a", role: "assistant", content: [{ type: "text", text: "hello" }] }],
+      est,
+    );
+    const withReasoning = estimateEventTokens(
+      [
+        {
+          type: "message",
+          id: "b",
+          role: "assistant",
+          content: [
+            { type: "reasoning", text: "x".repeat(40_000) },
+            { type: "text", text: "hello" },
+          ],
+        },
+      ],
+      est,
+    );
+    expect(withReasoning).toBe(textOnly);
+  });
 });
 
 describe("extractPlan", () => {
@@ -644,5 +725,96 @@ describe("compactionGeometry", () => {
     // window - reserve would go negative; clamp to the 4000 floor.
     expect(g.hardUsable).toBe(4_000);
     expect(g.hardTrigger).toBeLessThanOrEqual(g.hardUsable);
+  });
+});
+
+describe("midRunCompactPressure", () => {
+  const window = 200_000;
+  const hardTrigger = compactionGeometry({
+    window,
+    maxOutputTokens: 32_000,
+  }).hardTrigger; // ~168k
+
+  it("does not fire on ~95k provider input (the old double-count bug)", () => {
+    // Previously: autoTrigger=min(hardBudget≈107k, hardTrigger) then usage vs
+    // 0.9*autoTrigger ≈ 96k — falsely fired. Correct: usage vs window*0.9=180k.
+    expect(
+      midRunCompactPressure({
+        transcriptTokens: 40_000,
+        lastInputTokens: 94_828,
+        hardTrigger,
+        contextWindow: window,
+      }),
+    ).toBe(false);
+  });
+
+  it("fires when provider input reaches window × 0.9", () => {
+    const threshold = Math.floor(window * PROVIDER_INPUT_COMPACTION_RATIO);
+    expect(
+      midRunCompactPressure({
+        transcriptTokens: 10_000,
+        lastInputTokens: threshold,
+        hardTrigger,
+        contextWindow: window,
+      }),
+    ).toBe(true);
+  });
+
+  it("fires when transcript alone reaches hardTrigger", () => {
+    expect(
+      midRunCompactPressure({
+        transcriptTokens: hardTrigger,
+        lastInputTokens: 0,
+        hardTrigger,
+        contextWindow: window,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("serializeEventsForSummary — industry stubs", () => {
+  it("omits successful read_file bodies and keeps the path", () => {
+    const code = "export function foo() {\n  return 1;\n}\n".repeat(80);
+    const events: Event[] = [
+      {
+        type: "message",
+        id: "a1",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "c1",
+            name: "read_file",
+            input: { path: "packages/core/src/foo.ts" },
+          },
+        ],
+      },
+      {
+        type: "tool_result",
+        toolCallId: "c1",
+        name: "read_file",
+        content: code,
+      },
+    ];
+    const text = serializeEventsForSummary(events);
+    expect(text).toContain('target="packages/core/src/foo.ts"');
+    expect(text).toContain("[body omitted");
+    expect(text).not.toContain("export function foo");
+  });
+
+  it("keeps a short head for error tool results", () => {
+    const events: Event[] = [
+      {
+        type: "tool_result",
+        toolCallId: "e1",
+        name: "bash",
+        isError: true,
+        content: "Error: ENOENT: no such file or directory, open '/tmp/missing'\n" + "x".repeat(500),
+      },
+    ];
+    const text = serializeEventsForSummary(events);
+    expect(text).toContain("RESULT bash (error)");
+    expect(text).toContain("ENOENT");
+    expect(text.length).toBeLessThan(600);
   });
 });

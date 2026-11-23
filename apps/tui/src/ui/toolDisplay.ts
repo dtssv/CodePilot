@@ -41,14 +41,23 @@ export function toolLabel(tool: Pick<ToolRow, "name" | "category" | "input">): s
       return "Write";
     case "web":
       return n === "web_search" ? "Web search" : "Fetch";
-    case "task":
-      return n === "skill" ? "Skill" : n === "team" ? "Team" : "Task";
+    case "task": {
+      if (n === "skill") return "Skill";
+      if (n === "team") return "Team";
+      const action = (tool.input as { action?: string } | undefined)?.action;
+      if (action === "wait") return "Wait subtask";
+      if (action === "interrupt") return "Interrupt subtask";
+      if (action === "list") return "List subtasks";
+      return "Task";
+    }
     case "memory":
       return "Memory";
     case "plan":
-      return "Plan";
+      return (tool.input as { action?: string } | undefined)?.action === "done"
+        ? "Plan ready"
+        : "Plan";
     case "ask":
-      return n === "plan_done" ? "Plan ready" : "Question";
+      return "Question";
     default: {
       const mcp = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(n);
       return mcp ? `${mcp[1]} · ${mcp[2]}` : n;
@@ -74,6 +83,11 @@ export function bashCommand(tool: Pick<ToolRow, "input">): string | undefined {
 /** What the call acts on, on one line. */
 export function toolSubject(tool: Pick<ToolRow, "name" | "category" | "input" | "target">): string {
   if (tool.category === "task") {
+    const action = field(tool.input, "action");
+    if (action === "wait" || action === "interrupt") {
+      return (field(tool.input, "session_id") ?? tool.target).replace(/\s+/g, " ").trim();
+    }
+    if (action === "list") return "list";
     const objective = field(tool.input, "objective", "description", "prompt", "name") ?? tool.target;
     return objective.replace(/\s+/g, " ").trim();
   }

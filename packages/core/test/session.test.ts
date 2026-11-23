@@ -615,7 +615,7 @@ describe("Session", () => {
 
 
 describe("Session tool wiring", () => {
-  it("gives each session its own task / plan_done / memory_write wiring", async () => {
+  it("gives each session its own task / plan / goal / memory_write wiring", async () => {
     const { taskTool } = await import("../src/tools/task.js");
     const before = taskTool.runner;
     const dirA = mkdtempSync(join(tempHome, "work-a-"));
@@ -625,7 +625,7 @@ describe("Session tool wiring", () => {
       const b = await createSession({ cwd: dirB });
       type Reg = { toolRegistry: { get(n: string): Record<string, unknown> | undefined } };
       const tool = (s: unknown, name: string) => (s as Reg).toolRegistry.get(name)!;
-      for (const name of ["task", "plan_done", "memory_write"]) {
+      for (const name of ["task", "plan", "memory_write", "goal"]) {
         expect(tool(a, name)).not.toBe(tool(b, name));
       }
       expect(tool(a, "task").runner).toBeDefined();

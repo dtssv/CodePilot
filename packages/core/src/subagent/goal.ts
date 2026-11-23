@@ -8,7 +8,7 @@ import type { GoalRunOptions, GoalRunResult, Event } from "../types.js";
 import { appendCheckpointRound, checkpointPath } from "../session/checkpoints.js";
 import { killAllJobs } from "../tools/bashJobs.js";
 import { listSpecFeatures } from "../workspace/specs.js";
-import { DEFAULT_MODEL_GOAL_ROUNDS } from "../tools/start_goal.js";
+import { DEFAULT_MODEL_GOAL_ROUNDS } from "../tools/goal.js";
 
 /**
  * The two goal-completion markers the loop scans the final assistant text
@@ -66,14 +66,14 @@ export interface GoalRunOptionsEx extends GoalRunOptions {
 export const goalPromptBody = `You are running in a long-horizon goal loop. Each round you receive the same OBJECTIVE plus a short status line. Follow this protocol every turn:
 
 1. Read the current plan (the system prompt's <plan> block) to see where you left off.
-2. Identify the next step whose status is \`pending\` or whose status is \`in_progress\` from a prior round. Mark it \`in_progress\` via \`plan_update\`.
+2. Identify the next step whose status is \`pending\` or whose status is \`in_progress\` from a prior round. Mark it \`in_progress\` via \`plan\` (\`action: "update"\`).
 3. Execute that step using the available tools. Read files, make edits, run commands, call sub-agents — whatever the step needs.
 4. Verify the step's deliverable (run a test, a build, a lint, or the acceptance check the OBJECTIVE implies). Do not mark a step \`completed\` until verification passes. Do not emit \`completed\` for the whole OBJECTIVE until a verify step has succeeded.
 5. Update the plan: mark the just-finished step \`completed\`, advance the cursor.
 6. Decide whether the OBJECTIVE is fully satisfied:
-   - If YES, call the \`goal_status\` tool with \`status: "completed"\` (and a one-line reason). As a fallback you may instead end your turn with EXACTLY this line and nothing else after it:
+   - If YES, call \`goal\` with \`action: "status", status: "completed"\` (and a one-line reason). As a fallback you may instead end your turn with EXACTLY this line and nothing else after it:
      <goal_status>completed</goal_status>
-   - If NO, but you are blocked on something that cannot be resolved in this loop (missing credentials, an external service, an ambiguity that only the user can resolve), call \`goal_status\` with \`status: "blocked"\` and a one-line reason — or, as a fallback, end your turn with:
+   - If NO, but you are blocked on something that cannot be resolved in this loop (missing credentials, an external service, an ambiguity that only the user can resolve), call \`goal\` with \`action: "status", status: "blocked"\` and a one-line reason — or, as a fallback, end your turn with:
      <goal_status>blocked</goal_status>
      <goal_blocked_reason>one short sentence explaining the blocker</goal_blocked_reason>
    - Otherwise, do not report a status. The loop will keep prompting you.
@@ -257,7 +257,7 @@ ${objective}
 ${body}
 
 This is round 1 of the goal loop. Begin by reading the current plan (likely empty) and either:
-- call \`plan_update\` to create a first plan, or
+- call \`plan\` with \`action: "update"\` to create a first plan, or
 - if the task is trivial enough to handle inline (a one-line fix, a single command), do it now and end with \`<goal_status>completed</goal_status>\`.`;
   }
   return `OBJECTIVE (unchanged across rounds):

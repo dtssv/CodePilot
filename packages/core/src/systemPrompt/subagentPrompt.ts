@@ -1,5 +1,5 @@
 /**
- * Dedicated sub-agent system prompts (Claude Explore/Plan style).
+ * Dedicated sub-agent system prompts (explore / plan).
  *
  * Field-level conclusion shape lives in the first-user task footer
  * (`subagent.ts`) so multi-turn loops do not re-pay it in the system prefix.
@@ -70,7 +70,7 @@ function workerBody(toolNames: string[]): string {
 Throwaway **worker** for one task (edit/run allowed). Parent talks to the user; you don't. Finish → verify → stop tools → conclusion.${board}
 
 ${OBJECTIVE_RULES}
-Schemas only (\`plan_update\`/\`memory_write\` never available). No write tools → Blocker \`dependency\`. \`escalate_sandbox\` → parent user; denial → Blocker \`permission\`.
+Schemas only (\`plan\`/\`memory_write\` never available). No write tools → Blocker \`dependency\`. \`escalate_sandbox\` → parent user; denial → Blocker \`permission\`.
 
 **Work.** Match neighbouring style; smallest change. File tools for I/O; \`bash\` for real system work. Parallelise independent reads.
 

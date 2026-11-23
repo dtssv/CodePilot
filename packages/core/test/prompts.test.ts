@@ -101,16 +101,17 @@ describe("subagent specialist templates", () => {
 });
 
 describe("compaction summary prompt", () => {
-  it("enumerates the eight required sections in order", () => {
+  it("enumerates the checkpoint sections in CodePilot titles", () => {
     const order = [
-      "USER REQUESTS",
-      "CURRENT STATE",
-      "KEY FILES AND SYMBOLS",
-      "DECISIONS MADE",
-      "ERRORS AND FIXES",
-      "OPEN THREADS",
-      "NEXT MOVE",
-      "IMPORTANT CONTEXT",
+      "## Goals",
+      "## Concepts",
+      "## Key files",
+      "## Errors",
+      "## Done",
+      "## Pending",
+      "## Current",
+      "## Up next",
+      "## Critical",
     ];
     let lastIdx = -1;
     for (const heading of order) {
@@ -120,11 +121,32 @@ describe("compaction summary prompt", () => {
     }
   });
 
+  it("pins user goals, plan statuses, and latest-ask next step", () => {
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Every distinct user request/i);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/\[pending\]/);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/\[in_progress\]/);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/most recent explicit ask/i);
+  });
+
+  it("keeps Done vs Pending vs Current vs Errors vs Critical distinct", () => {
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Finished work and verified outcomes/i);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/not yet started/i);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/in flight at this checkpoint/i);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Do not put completed work here/i);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/how it was fixed/i);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Decisions and one-line why/i);
+  });
+
   it("keeps the anti-loss disciplines (verbatim, never-drop, verified-vs-assumed, source separation)", () => {
     expect(SUMMARY_SYSTEM_PROMPT).toMatch(/verbatim/i);
     expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Never paraphrase/);
     expect(SUMMARY_SYSTEM_PROMPT).toMatch(/never drop a section/i);
     expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Distinguish verified from assumed/);
-    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Source separation/);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/Source separation/i);
+  });
+
+  it("forbids pasting file/tool bodies into the checkpoint", () => {
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/NEVER paste file contents/i);
+    expect(SUMMARY_SYSTEM_PROMPT).toMatch(/tool bodies/i);
   });
 });

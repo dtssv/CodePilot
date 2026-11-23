@@ -22,7 +22,8 @@ function ctxWith(dir: string, store: FileObservationStore): ToolContext {
     cwd: dir,
     artifact: async () => "art_test",
     readArtifact: async () => "",
-    observeFile: (p, s, h) => store.observe(p, s, h),
+    observeFile: (p, s, h, w) => store.observe(p, s, h, w),
+    isUnchangedRead: (p, w, s) => store.isUnchangedRead(p, w, s),
     checkFileFresh: (p, s, h, opts) => store.checkFresh(p, s, h, opts),
     reobserveFile: (p, s, h) => store.reobserveAfterWrite(p, s, h),
   } as ToolContext;
@@ -209,7 +210,7 @@ describe("write_file overwrite guard", () => {
     expect(res.isError).toBeUndefined();
   });
 
-  it("allows overwriting an existing, unread file (no hard read gate)", async () => {
+  it("refuses overwriting an existing unread file", async () => {
     const dir = tmp();
     const p = join(dir, "a.ts");
     writeFileSync(p, "old\n");
@@ -218,6 +219,19 @@ describe("write_file overwrite guard", () => {
       { path: "a.ts", content: "new\n" },
       ctxWith(dir, store),
     );
+    expect(res.isError).toBe(true);
+    expect(res.content).toMatch(/have not read|read_file/i);
+    expect(readFileSync(p, "utf-8")).toBe("old\n");
+  });
+
+  it("allows overwrite after read_file observed the path", async () => {
+    const dir = tmp();
+    const p = join(dir, "a.ts");
+    writeFileSync(p, "old\n");
+    const store = new FileObservationStore();
+    const ctx = ctxWith(dir, store);
+    await readFileTool.execute({ path: "a.ts" }, ctx);
+    const res = await writeFileTool.execute({ path: "a.ts", content: "new\n" }, ctx);
     expect(res.isError).toBeUndefined();
     expect(readFileSync(p, "utf-8")).toBe("new\n");
   });
@@ -351,5 +365,41 @@ describe("CRLF preservation (G3)", () => {
   it("applyEdit itself normalises to \\n (restore happens in the tool)", () => {
     const r = applyEdit("a\r\nb\r\n", { search: "b", replace: "B" });
     expect(r.ok).toBe(true);
+  });
+});
+
+describe("UTF-8 BOM preservation", () => {
+  it("edit_file keeps a leading BOM when the model search omits it", async () => {
+    const dir = tmp();
+    const p = join(dir, "bom.txt");
+    writeFileSync(p, "\uFEFFhello world\n", "utf-8");
+    const store = new FileObservationStore();
+    const ctx = ctxWith(dir, store);
+    await readFileTool.execute({ path: "bom.txt" }, ctx);
+    const res = await editFileTool.execute(
+      { path: "bom.txt", search: "hello", replace: "hi" },
+      ctx,
+    );
+    expect(res.isError).toBeUndefined();
+    const raw = readFileSync(p);
+    expect(raw[0]).toBe(0xef);
+    expect(raw[1]).toBe(0xbb);
+    expect(raw[2]).toBe(0xbf);
+    expect(raw.toString("utf-8")).toBe("\uFEFFhi world\n");
+  });
+
+  it("write_file overwrite restores BOM from the prior file", async () => {
+    const dir = tmp();
+    const p = join(dir, "bom.txt");
+    writeFileSync(p, "\uFEFFold\n", "utf-8");
+    const store = new FileObservationStore();
+    const ctx = ctxWith(dir, store);
+    await readFileTool.execute({ path: "bom.txt" }, ctx);
+    const res = await writeFileTool.execute(
+      { path: "bom.txt", content: "new\n" },
+      ctx,
+    );
+    expect(res.isError).toBeUndefined();
+    expect(readFileSync(p, "utf-8")).toBe("\uFEFFnew\n");
   });
 });

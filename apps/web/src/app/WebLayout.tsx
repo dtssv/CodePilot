@@ -15,6 +15,8 @@ import {
 } from "../components/Chrome.js";
 import { FilePreview } from "../components/AgentView.js";
 import { parseReference } from "../state/paths.js";
+import { FeatureDialogHost, openFeature } from "../components/FeatureDialog.js";
+import { FeatureMenu } from "../components/FeatureMenu.js";
 import { SettingsPanel } from "../components/SettingsPanel.js";
 import { WorkspacePanel } from "../components/WorkspacePanel.js";
 import {
@@ -45,7 +47,11 @@ export function WebLayout({
   setDraft,
   theme,
   toggleTheme,
+  themePreference,
   setThemePersist,
+  setLocalePersist,
+  panelPosition,
+  setPanelPosition,
   themeName,
   setThemeNamePersist,
   layout,
@@ -92,9 +98,32 @@ export function WebLayout({
   // The first-run guide (and any surface) can request the Settings panel via a
   // window event, so it doesn't need a direct handle to this layout's state.
   useEffect(() => {
-    const open = (): void => setShowSettings(true);
+    const open = (ev: Event): void => {
+      const section = (ev as CustomEvent<{ section?: string }>).detail?.section;
+      if (
+        section === "connectors" ||
+        section === "custom-mcp" ||
+        section === "skills" ||
+        section === "remote" ||
+        section === "schedule"
+      ) {
+        openFeature(section);
+        return;
+      }
+      setShowSettings(true);
+      if (section) {
+        requestAnimationFrame(() =>
+          window.dispatchEvent(new CustomEvent("codepilot:settings-nav", { detail: { section } })),
+        );
+      }
+    };
+    const openHistory = (): void => setShowSidebar(true);
     window.addEventListener("codepilot:open-settings", open);
-    return () => window.removeEventListener("codepilot:open-settings", open);
+    window.addEventListener("codepilot:open-history", openHistory);
+    return () => {
+      window.removeEventListener("codepilot:open-settings", open);
+      window.removeEventListener("codepilot:open-history", openHistory);
+    };
   }, []);
   // Global ⌘K / Ctrl+K toggles the command palette. Registered before any
   // early return so the hook order stays stable.
@@ -127,7 +156,7 @@ export function WebLayout({
         defaultUrl={surface.autoConnect?.url ?? prefs.url}
         defaultToken={prefs.token || surface.autoConnect?.token || ""}
         onConnect={(o) => void cp.connect(o)}
-        topRight={<ThemeToggle theme={theme} onToggle={toggleTheme} />}
+        topRight={<ThemeToggle theme={theme} preference={themePreference} onToggle={toggleTheme} />}
       />
     );
   }
@@ -215,6 +244,9 @@ export function WebLayout({
       });
     }
     act("settings", t("Settings"), () => setShowSettings(true));
+    act("skills-connectors", t("Skills · Connectors"), () => openFeature("skills"), "mcp skills");
+    act("schedule", t("Schedule"), () => openFeature("schedule"), "idle");
+    act("remote", t("Remote"), () => openFeature("remote"));
     act("toggle-theme", t("Toggle theme"), () => toggleTheme());
     act("agent-view", t("Switch to Agent view"), () => onSwitch());
     if (connected && !checkingUpdate) {
@@ -264,6 +296,7 @@ export function WebLayout({
             newLabel={t("New chat")}
             emptyText={t("No saved sessions yet.")}
             canOpenNewWorkspace={canPickWorkspace}
+            primaryNav={<FeatureMenu disabled={!connected} />}
             onOpenWorkspace={(ws) => void cp.openWorkspace(ws)}
             onCloseWorkspace={(ws) => void cp.closeWorkspace(ws)}
             onOpenNewWorkspace={() => void openNewWorkspace()}
@@ -296,7 +329,7 @@ export function WebLayout({
               <button type="button" className="cp-icon-btn" onClick={onSwitch} title={t("Agent view")}>
                 <RocketIcon className="h-4 w-4" />
               </button>
-              <ThemeToggle theme={theme} onToggle={toggleTheme} />
+              <ThemeToggle theme={theme} preference={themePreference} onToggle={toggleTheme} />
             </div>
           </div>
         </aside>
@@ -416,6 +449,13 @@ export function WebLayout({
                 onAnswer={(a) => void cp.answerQuestion(a)}
                 onRetry={() => void cp.retryLast()}
                 onOpenPath={(p) => setPreview(parseReference(p).path)}
+                onAddToChat={(text) => {
+                  const quote = text
+                    .split("\n")
+                    .map((l) => `> ${l}`)
+                    .join("\n");
+                  setDraft(draft.trim() ? `${draft.trim()}\n\n${quote}` : quote);
+                }}
               />
             )}
           </div>
@@ -481,16 +521,32 @@ export function WebLayout({
         cp={cp}
         open={showSettings}
         onClose={() => setShowSettings(false)}
-        theme={theme}
+        themePreference={themePreference}
         onTheme={setThemePersist}
         themeName={themeName}
         onThemeName={setThemeNamePersist}
+        onLocale={setLocalePersist}
+        panelPosition={panelPosition}
+        onPanelPosition={setPanelPosition}
         layout={layout}
         onLayout={switchLayout}
         onComposePrompt={(text) => {
           setDraft(text);
           setShowSettings(false);
         }}
+      />
+      <FeatureDialogHost
+        cp={cp}
+        themePreference={themePreference}
+        onTheme={setThemePersist}
+        themeName={themeName}
+        onThemeName={setThemeNamePersist}
+        onLocale={setLocalePersist}
+        panelPosition={panelPosition}
+        onPanelPosition={setPanelPosition}
+        layout={layout}
+        onLayout={switchLayout}
+        onComposePrompt={(text) => setDraft(text)}
       />
       {showPalette && <CommandPalette commands={paletteCommands} onClose={() => setShowPalette(false)} />}
     </div>

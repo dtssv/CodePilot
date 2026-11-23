@@ -58,11 +58,11 @@ const CATEGORY_BY_NAME: Record<string, ToolCategory> = {
   memory_write: "memory",
   remember: "memory",
   memory: "memory",
-  plan_update: "plan",
+  plan: "plan",
   todo_write: "plan",
   update_plan: "plan",
   ask_user_question: "ask",
-  plan_done: "ask",
+  goal: "task",
 };
 
 export function toolCategory(name: string): ToolCategory {
@@ -136,23 +136,46 @@ export function toolFilePaths(input: unknown): string[] {
 export function toolVerb(name: string, input?: unknown): string {
   const cat = toolCategory(name);
   if (input && typeof input === "object") {
-    const patch = (input as Record<string, unknown>).patch;
+    const o = input as Record<string, unknown>;
+    const patch = o.patch;
     if (typeof patch === "string") {
       const touches = patchTouches(patch);
       if (touches.length > 0 && touches.every((t) => t.op === "add")) return CATEGORY_VERB.write;
       if (touches.length > 0 && touches.every((t) => t.op === "delete")) return "Deleted";
     }
+    // `task` control actions are not "Delegated" — label by the action.
+    if (name === "task" && typeof o.action === "string") {
+      if (o.action === "wait") return "Waited for subtask";
+      if (o.action === "interrupt") return "Interrupted subtask";
+      if (o.action === "list") return "Listed subtasks";
+    }
+    if (name === "plan" && o.action === "done") return "Plan ready";
   }
   if (cat === "other") return name;
   return CATEGORY_VERB[cat];
 }
 
 /** One-line subject: files (with +/− marks for patch ops), command, pattern… */
-export function toolTarget(input: unknown): string {
+export function toolTarget(input: unknown, toolName?: string): string {
   if (input === undefined || input === null) return "";
   if (typeof input !== "object") return oneLine(String(input), 160);
   const o = input as Record<string, unknown>;
-  for (const key of ["command", "path", "file_path", "filePath", "notebook_path", "pattern", "query", "url", "objective", "description", "ref"]) {
+  // task wait/interrupt: show the session id (no objective on control calls).
+  if (
+    toolName === "task" &&
+    (o.action === "wait" || o.action === "interrupt") &&
+    typeof o.session_id === "string" &&
+    o.session_id.trim()
+  ) {
+    return oneLine(o.session_id, 160);
+  }
+  // grep's subject is the pattern; `path` is only a search root and hid the
+  // failing regex when both were present (trajectory showed only the cwd).
+  const keys =
+    toolName === "grep"
+      ? ["pattern", "path", "cwd", "query", "command", "file_path", "filePath", "notebook_path", "url", "objective", "description", "ref"]
+      : ["command", "path", "file_path", "filePath", "notebook_path", "pattern", "query", "url", "objective", "description", "ref"];
+  for (const key of keys) {
     const v = o[key];
     if (typeof v === "string" && v.trim() !== "") return oneLine(v, 160);
   }
@@ -173,6 +196,7 @@ export function toolTarget(input: unknown): string {
 /** One piece inside an assistant turn (tools, text, plan, …). */
 export type TurnPart =
   | { kind: "message"; msg: MessageRow }
+  | { kind: "steer"; msg: MessageRow }
   | { kind: "steps"; tools: ToolRow[] }
   | { kind: "plan"; steps: PlanStep[]; latest: boolean }
   | { kind: "row"; row: Exclude<Row, { kind: "message" | "tool" | "plan" | "usage" }> };
@@ -214,6 +238,12 @@ export function groupRows(rows: Row[]): Block[] {
         return;
       case "message":
         if (r.msg.role === "user") {
+          // Mid-run corrections stay inside the current Q&A — not a new bubble.
+          if (r.msg.steer) {
+            if (!turnKey) turnKey = `turn-steer-${r.msg.id}`;
+            turnParts.push({ kind: "steer", msg: r.msg });
+            return;
+          }
           flushTurn();
           blocks.push({ kind: "message", key: `m-${r.msg.id}`, msg: r.msg });
           return;
@@ -308,7 +338,14 @@ export function touchedFiles(rows: Row[]): TouchedFile[] {
 export function lastUserPrompt(rows: Row[]): string | undefined {
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!;
-    if (r.kind === "message" && r.msg.role === "user" && r.msg.text.trim() !== "") return r.msg.text;
+    if (
+      r.kind === "message" &&
+      r.msg.role === "user" &&
+      !r.msg.steer &&
+      r.msg.text.trim() !== ""
+    ) {
+      return r.msg.text;
+    }
   }
   return undefined;
 }
@@ -318,7 +355,7 @@ export function currentActivity(rows: Row[]): ToolRow | undefined {
   for (let i = rows.length - 1; i >= 0; i--) {
     const r = rows[i]!;
     if (r.kind === "tool" && r.tool.status === "running") return r.tool;
-    if (r.kind === "message" && r.msg.role === "user") return undefined;
+    if (r.kind === "message" && r.msg.role === "user" && !r.msg.steer) return undefined;
   }
   return undefined;
 }

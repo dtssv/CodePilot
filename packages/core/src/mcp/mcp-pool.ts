@@ -4,7 +4,7 @@
  * blocking resume.
  */
 
-import { McpManager } from "./mcp.js";
+import { McpManager, type McpManagerOptions } from "./mcp.js";
 import type { McpServerConfig } from "../types.js";
 import type { McpTransportContext } from "./mcp-types.js";
 import { mcpWantsSandbox } from "./mcp-stdio.js";
@@ -27,6 +27,8 @@ export function mcpServersKey(servers: Record<string, McpServerConfig>): string 
   return JSON.stringify(norm);
 }
 
+export type AcquireSharedMcpOptions = McpManagerOptions;
+
 /**
  * Acquire (or start) a shared manager for `servers`. Caller must
  * {@link releaseSharedMcp} exactly once when the session no longer needs it.
@@ -34,9 +36,14 @@ export function mcpServersKey(servers: Record<string, McpServerConfig>): string 
 export async function acquireSharedMcp(
   servers: Record<string, McpServerConfig>,
   ctx?: McpTransportContext,
+  opts?: number | AcquireSharedMcpOptions,
 ): Promise<McpManager | null> {
   const names = Object.keys(servers);
   if (names.length === 0) return null;
+  const resolved: McpManagerOptions =
+    typeof opts === "number"
+      ? { requestTimeoutMs: opts }
+      : { ...(opts ?? {}) };
   // Separate pools for auth vs no-auth so Settings OAuth / sessions with
   // openAuthUrl never reuse a headless manager that cannot authorize.
   const authTag = ctx?.openAuthUrl ? ":auth" : ":noauth";
@@ -45,14 +52,24 @@ export async function acquireSharedMcp(
   const sandboxTag = Object.values(servers).some((s) => mcpWantsSandbox(s, ctx))
     ? `:sandbox:${JSON.stringify([ctx!.cwd, ctx!.sandbox, ctx!.mcpSandbox === true])}`
     : "";
-  const key = mcpServersKey(servers) + authTag + sandboxTag;
+  const timeoutTag =
+    resolved.requestTimeoutMs !== undefined
+      ? `:timeout:${Math.floor(resolved.requestTimeoutMs)}`
+      : "";
+  const startupTag =
+    resolved.startupTimeoutMs !== undefined
+      ? `:startup:${Math.floor(resolved.startupTimeoutMs)}`
+      : "";
+  const reverseTag = resolved.clientReverseRequests ? ":rev" : "";
+  const key =
+    mcpServersKey(servers) + authTag + sandboxTag + timeoutTag + startupTag + reverseTag;
   const existing = pool.get(key);
   if (existing) {
     existing.refs += 1;
     return existing.ready;
   }
 
-  const manager = new McpManager(servers, ctx);
+  const manager = new McpManager(servers, ctx, resolved);
   const ready = manager.startAll().then(() => manager);
   const entry: PoolEntry = { key, manager, refs: 1, ready };
   pool.set(key, entry);
@@ -76,19 +93,13 @@ export async function releaseSharedMcp(manager: McpManager | null): Promise<void
     try {
       await entry.manager.stopAll();
     } catch {
- /* ignore */
+      /* ignore */
     }
     return;
   }
- // Not pooled (tests / legacy) — stop directly.
-  try {
-    await manager.stopAll();
-  } catch {
- /* ignore */
-  }
 }
 
-/** Test helper. */
+/** Test-only: clear the shared pool. */
 export function resetMcpPoolForTests(): void {
   pool.clear();
 }

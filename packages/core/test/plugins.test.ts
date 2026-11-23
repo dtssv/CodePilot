@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -600,6 +600,26 @@ describe("mergePluginConfig", () => {
     });
     expect(pluginContentHash(changedHook.manifest)).not.toBe(pluginContentHash(base.manifest));
   });
+
+  it("folds runtime module file bytes into the fingerprint", () => {
+    const dir = mkdtempSync(join(tmpdir(), "plugin-hash-"));
+    try {
+      const mod = join(dir, "runtime.mjs");
+      writeFileSync(mod, "export default {}\n", "utf-8");
+      const manifest = makeManifest({
+        name: "rt",
+        runtime: { module: "./runtime.mjs" },
+      });
+      const h1 = pluginContentHash(manifest, dir);
+      writeFileSync(mod, "export default { changed: true }\n", "utf-8");
+      const h2 = pluginContentHash(manifest, dir);
+      expect(h2).not.toBe(h1);
+      // Manifest-only hash (no path) stays stable across file edits.
+      expect(pluginContentHash(manifest)).toBe(pluginContentHash(manifest));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -607,6 +627,12 @@ describe("mergePluginConfig", () => {
 // ---------------------------------------------------------------------------
 
 describe("installPlugin", () => {
+  it("refuses to install without explicit consent", async () => {
+    await expect(
+      installPlugin("/tmp/nope", { installDir: "/tmp/nope-out" }),
+    ).rejects.toThrow(/consent/);
+  });
+
   let base: string;
   let installRoot: string;
   let srcDir: string;
@@ -628,10 +654,14 @@ describe("installPlugin", () => {
   });
 
   it("installs from a local directory", async () => {
-    const target = await installPlugin(srcDir, { installDir: installRoot });
+    const target = await installPlugin(srcDir, { consent: true,  installDir: installRoot });
 
     expect(target).toBe(installRoot);
     expect(existsSync(join(target, "plugin.json"))).toBe(true);
+    expect(existsSync(join(target, ".install.json"))).toBe(true);
+    const meta = JSON.parse(readFileSync(join(target, ".install.json"), "utf-8"));
+    expect(meta.source).toBe(srcDir);
+    expect(typeof meta.installedAt).toBe("string");
 
     const manifest = JSON.parse(
       await import("node:fs/promises").then((fs) =>
@@ -642,15 +672,15 @@ describe("installPlugin", () => {
   });
 
   it("throws when the plugin is already installed (without force)", async () => {
-    await installPlugin(srcDir, { installDir: installRoot });
+    await installPlugin(srcDir, { consent: true,  installDir: installRoot });
 
-    await expect(installPlugin(srcDir, { installDir: installRoot })).rejects.toThrow(
+    await expect(installPlugin(srcDir, { consent: true,  installDir: installRoot })).rejects.toThrow(
       /already installed/
     );
   });
 
   it("force overwrites an existing installation", async () => {
-    await installPlugin(srcDir, { installDir: installRoot });
+    await installPlugin(srcDir, { consent: true,  installDir: installRoot });
 
  // Modify the source manifest
     writeFileSync(
@@ -659,7 +689,7 @@ describe("installPlugin", () => {
       "utf-8"
     );
 
-    const target = await installPlugin(srcDir, { installDir: installRoot, force: true });
+    const target = await installPlugin(srcDir, { consent: true,  installDir: installRoot, force: true });
     expect(existsSync(target)).toBe(true);
 
     const manifest = JSON.parse(
@@ -675,14 +705,14 @@ describe("installPlugin", () => {
     mkdirSync(emptySrc, { recursive: true });
 
     await expect(
-      installPlugin(emptySrc, { installDir: join(base, "target") })
+      installPlugin(emptySrc, { consent: true,  installDir: join(base, "target") })
     ).rejects.toThrow(/no plugin\.json/);
   });
 
   it("records the sensitive-content fingerprint on install", async () => {
     const trustFile = join(base, "trust.json");
     const store = new PluginTrustStore(trustFile);
-    await installPlugin(srcDir, { installDir: installRoot, trustStore: store });
+    await installPlugin(srcDir, { consent: true,  installDir: installRoot, trustStore: store });
     // The recorded hash matches the installed manifest's sensitive content.
     const fresh = new PluginTrustStore(trustFile);
     await fresh.load();
@@ -696,7 +726,7 @@ describe("installPlugin", () => {
 
   it("throws when source directory does not exist", async () => {
     await expect(
-      installPlugin(join(base, "nonexistent"), { installDir: join(base, "target") })
+      installPlugin(join(base, "nonexistent"), { consent: true, installDir: join(base, "target") })
     ).rejects.toThrow(/source not found/);
   });
 
@@ -705,7 +735,7 @@ describe("installPlugin", () => {
     mkdirSync(emptySrc, { recursive: true });
     const target = join(base, "target");
 
-    await expect(installPlugin(emptySrc, { installDir: target })).rejects.toThrow();
+    await expect(installPlugin(emptySrc, { consent: true,  installDir: target })).rejects.toThrow();
     expect(existsSync(target)).toBe(false);
   });
 
@@ -721,7 +751,7 @@ describe("installPlugin", () => {
       "utf-8",
     );
 
-    const target = await installPlugin(`${mono}#code-review`, { installDir: installRoot });
+    const target = await installPlugin(`${mono}#code-review`, { consent: true,  installDir: installRoot });
     expect(existsSync(join(target, "plugin.json"))).toBe(true);
     const manifest = JSON.parse(
       await import("node:fs/promises").then((fs) =>
@@ -735,7 +765,7 @@ describe("installPlugin", () => {
     const mono = join(base, "mono-repo2");
     mkdirSync(mono, { recursive: true });
     await expect(
-      installPlugin(`${mono}#does-not-exist`, { installDir: join(base, "t2") }),
+      installPlugin(`${mono}#does-not-exist`, { consent: true,  installDir: join(base, "t2") }),
     ).rejects.toThrow(/source not found|sub-directory not found/);
   });
 });

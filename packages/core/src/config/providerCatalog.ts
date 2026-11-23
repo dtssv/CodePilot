@@ -19,7 +19,6 @@ import {
   resolveModelAlias,
 } from "./config.js";
 import { loadCatalogDocument } from "./remoteCatalog.js";
-import { catalogModalities } from "./modelCatalog.js";
 // Static import required: Bun --compile drops nested dynamic import() modules.
 import { decryptSecretFields, encryptSecretFields } from "./secretCrypto.js";
 
@@ -459,16 +458,14 @@ export function resolveModelCapabilities(
       contextWindow = clampContextWindow(contextWindow, max);
     }
   }
-  // Modalities precedence: a prior user edit, then the live probe, then the
-  // declarative catalog for a known model, finally a bare text default.
+  // Modalities: prior user edit → live `/models` probe → text-only default.
+  // No static vendor catalog — new models/providers need not edit core.
   const modalities: ModelModality[] =
     existing?.modalities?.length
       ? existing.modalities
       : remote?.modalities?.length
         ? remote.modalities
-        : catalogModalities(modelId)?.length
-          ? [...catalogModalities(modelId)!]
-          : ["text"];
+        : ["text"];
   const normalized = modalities.includes("text")
     ? modalities
     : (["text", ...modalities] as ModelModality[]);
@@ -481,7 +478,24 @@ export function resolveModelCapabilities(
     contextWindow,
     modalities: normalized,
     maxOutputTokens,
+    ...(existing?.reasoningEffortChoices?.length
+      ? { reasoningEffortChoices: existing.reasoningEffortChoices }
+      : {}),
   };
+}
+
+/** True when `window` equals some entry in any provider's modelCapabilities. */
+function contextWindowMirroredInCaps(
+  cfg: ResolvedCodepilotConfig,
+  window: number | undefined,
+): boolean {
+  if (typeof window !== "number") return false;
+  for (const preset of Object.values(cfg.providers ?? {})) {
+    for (const caps of Object.values(preset.modelCapabilities ?? {})) {
+      if (caps.contextWindow === window) return true;
+    }
+  }
+  return false;
 }
 
 /** Apply a named provider + model onto a config copy. */
@@ -510,6 +524,11 @@ export function applyProviderAndModel(
     if (caps.maxOutputTokens !== undefined) {
       out.maxTokens = caps.maxOutputTokens;
     }
+  } else if (contextWindowMirroredInCaps(extended, config.contextWindow)) {
+    // Previous selection wrote another model's caps onto this config object.
+    // Drop that peer window so gauges/compaction don't keep a stale budget;
+    // keep a user/global contextWindow that isn't mirrored in any capability.
+    out.contextWindow = DEFAULT_MODEL_CONTEXT_WINDOW;
   }
   return {
     config: out,
@@ -656,7 +675,7 @@ export async function listRemoteModels(opts: {
   provider: ProviderName;
   baseURL?: string;
   apiKey?: string;
-  /** Extra request headers (OpenCode / gateway auth). */
+  /** Extra request headers (gateway auth / proxies). */
   headers?: Record<string, string>;
 }): Promise<RemoteModelInfo[]> {
   const provider = opts.provider;

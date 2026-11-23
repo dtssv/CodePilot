@@ -12,8 +12,36 @@ import {
 } from "../workspace/deliveryRoots.js";
 
 /**
- * Directory *names* that glob/grep skip by default (unless the caller passes
- * `includeIgnored: true`). Compared against a single path segment (`ent.name`).
+ * VCS metadata directory names — never useful to search, even with
+ * `includeIgnored: true`.
+ */
+export const VCS_DIR_NAMES = [".git", ".svn", ".hg", ".bzr", ".jj", ".sl"] as const;
+
+/**
+ * ripgrep --glob args that keep VCS metadata out: a bare prune form plus a
+ * recursive contents form per name, so exclusions still apply when the search
+ * root is at or inside that directory. Always
+ * pass these; critical when --no-ignore
+ * is set so includeIgnored cannot sweep .git/objects.
+ */
+export function rgVcsExcludeArgs(): string[] {
+  return VCS_DIR_NAMES.flatMap((name) => [
+    `--glob=!**/${name}`,
+    `--glob=!**/${name}/` + "**",
+  ]);
+}
+
+/** True when `name` is a VCS metadata directory. */
+export function isVcsDirName(name: string): boolean {
+  return (VCS_DIR_NAMES as readonly string[]).includes(name);
+}
+
+/**
+ * Directory *names* that the JS walker (glob / grep fallback) skips by default
+ * unless `includeIgnored: true` is passed. Compared against a single path
+ * segment (`ent.name`). The ripgrep backend instead respects `.gitignore`,
+ * always passes `--hidden` (plus `--no-ignore` when `includeIgnored`), and
+ * {@link rgVcsExcludeArgs} / {@link rgRuntimeExcludeArgs}.
  */
 export const DEFAULT_IGNORED_DIRS: ReadonlySet<string> = new Set([
   ".git",
@@ -51,6 +79,20 @@ export const DEFAULT_IGNORED_REL_PATHS: ReadonlySet<string> = new Set([
   ".codepilot/sessions",
 ]);
 
+/**
+ * Runtime state paths that must never enter grep/glob hits (spill logs, job
+ * output, session JSONL). Always pass to rg — `--hidden` would otherwise
+ * surface `.codepilot/artifacts` when the tree is not gitignored.
+ */
+export function rgRuntimeExcludeArgs(): string[] {
+  return [...DEFAULT_IGNORED_REL_PATHS].flatMap((rel) => [
+    `--glob=!${rel}`,
+    `--glob=!${rel}/` + "**",
+    `--glob=!**/${rel}`,
+    `--glob=!**/${rel}/` + "**",
+  ]);
+}
+
 /** True when `name` is a known heavy/cache directory basename. */
 export function isIgnoredDirName(name: string): boolean {
   return DEFAULT_IGNORED_DIRS.has(name);
@@ -60,8 +102,18 @@ export function isIgnoredDirName(name: string): boolean {
  * True when a walker should skip this directory entry.
  * @param relPath entry path relative to the search root (`/` separators).
  * @param name the entry's basename (`ent.name`).
+ * @param includeIgnored when true, only still skip VCS metadata (`.git`/…) that
+ *   is never useful to search; hard-ignored build dirs are included.
  */
-export function shouldSkipWalkDir(relPath: string, name: string): boolean {
+export function shouldSkipWalkDir(
+  relPath: string,
+  name: string,
+  includeIgnored = false,
+): boolean {
+  if (includeIgnored) {
+    // Always skip VCS roots even when including ignored build artifacts.
+    return isVcsDirName(name);
+  }
   if (DEFAULT_IGNORED_DIRS.has(name)) return true;
   const norm = relPath.replace(/\\/g, "/").replace(/^\.\//, "");
   if (DEFAULT_IGNORED_REL_PATHS.has(norm)) return true;
@@ -74,12 +126,17 @@ export function shouldSkipWalkDir(relPath: string, name: string): boolean {
 /** Shared threshold for spilling large tool output to an artifact. Above this
  * many characters, a tool keeps a bounded inline view and stashes the full body
  * via {@link ToolContext.artifact}. Single-sourced so several tools enforce the
- * same budget consistently. */
+ * same budget consistently.
+ *
+ * Must stay strictly greater than {@link DEFAULT_SPILL_HEAD}+{@link DEFAULT_SPILL_TAIL}
+ * so a just-over-threshold spill is shorter than the original (otherwise the
+ * head+tail view plus marker can exceed the input, and the `omitted <= 0`
+ * guard is unreachable for the defaults). */
 export const ARTIFACT_THRESHOLD = 8_000;
 
 /** Default head/tail window for {@link spillHeadTail}. */
-const DEFAULT_SPILL_HEAD = 4_000;
-const DEFAULT_SPILL_TAIL = 4_000;
+const DEFAULT_SPILL_HEAD = 2_000;
+const DEFAULT_SPILL_TAIL = 2_000;
 
 /**
  * Spill `content` to an artifact and return a bounded head+tail inline view
@@ -242,7 +299,8 @@ export interface GuardFreshWriteOptions {
   readCurrent?: () => Promise<Buffer | string | null>;
   /**
    * Refuse existing files never observed this session. Default false — surgical
-   * edits rely on patch/`old_string` matching live disk instead.
+   * edits (`edit_file`) rely on search matching live disk instead.
+   * Blind full-replace paths (`write_file` / notebook_edit) pass true.
    */
   requireObserved?: boolean;
 }

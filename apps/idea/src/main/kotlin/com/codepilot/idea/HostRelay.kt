@@ -1,6 +1,7 @@
 package com.codepilot.idea
 
 import com.google.gson.Gson
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import java.io.File
@@ -17,6 +18,9 @@ interface LineEngine {
 /** Static facts sent to the page in `host/init`. */
 data class HostInit(val cwd: String, val theme: String, val locale: String)
 
+/** A file (optionally a line range) attached to a prompt as a chip. */
+data class CodeRef(val path: String, val startLine: Int? = null, val endLine: Int? = null)
+
 /**
  * The IDE side of the web UI's host bridge (apps/web/src/protocol/bridge.ts).
  *
@@ -32,10 +36,8 @@ class HostRelay(
     private val openFile: (path: String, line: Int?) -> Unit = { _, _ -> },
     private val insertText: (text: String) -> Unit = { },
     private val onEngineError: (String) -> Unit = {},
-    /** Expand/focus the CodePilot tool window before in-panel settings. */
-    private val onExpandForSettings: () -> Unit = {},
-    /** Restore tool-window width after in-panel settings closes. */
-    private val onRestoreAfterSettings: () -> Unit = {},
+    /** The page asked for Settings (optionally a section) — open it as an editor tab. */
+    private val onOpenSettings: (section: String?) -> Unit = {},
 ) {
     lateinit var engine: LineEngine
 
@@ -75,16 +77,11 @@ class HostRelay(
                 openFile(path, line)
             }
             "insertText" -> msg.str("text")?.let { text -> insertText(text) }
-            "openSettings" -> onExpandForSettings()
-            "closeSettings" -> onRestoreAfterSettings()
+            "openSettings" -> onOpenSettings(msg.str("section"))
+            // Settings live in their own editor tab: nothing to close in this page.
+            "closeSettings" -> { }
             "setCwd" -> { /* UI owns cwd; IDEA is single-project */ }
         }
-    }
-
-    /** Ask the page to open the in-panel Settings sheet (same JCEF view). */
-    fun openSettings() {
-        onExpandForSettings()
-        send(obj("host/openSettings") {})
     }
 
     fun fromEngine(line: String) = send(obj("rpc") { addProperty("line", line) }, keepUntilReady = false)
@@ -93,10 +90,29 @@ class HostRelay(
 
     fun theme(theme: String) = send(obj("host/theme") { addProperty("theme", theme) })
 
+ /** Ask the page to open its Settings surface on [section]. Queued until the page is ready. */
+    fun openSettings(section: String? = null) = send(obj("host/openSettings") {
+        section?.let { addProperty("section", it) }
+    })
+
  /** Put [text] into the composer, or send it when [send] is true. */
-    fun prompt(text: String, send: Boolean) = send(obj("host/prompt") {
+    fun prompt(text: String, send: Boolean) = prompt(text, send, emptyList())
+
+ /** Put [text] into the composer with structured file references attached. */
+    fun prompt(text: String, send: Boolean, refs: List<CodeRef>) = send(obj("host/prompt") {
         addProperty("text", text)
         addProperty("send", send)
+        if (refs.isNotEmpty()) {
+            add("refs", JsonArray().apply {
+                refs.forEach { r ->
+                    add(JsonObject().apply {
+                        addProperty("path", r.path)
+                        r.startLine?.let { addProperty("startLine", it) }
+                        r.endLine?.let { addProperty("endLine", it) }
+                    })
+                }
+            })
+        }
     })
 
  /** Run a composer command in the page (e.g. "new" opens a fresh session). */
@@ -151,12 +167,19 @@ class HostRelay(
         get(key)?.takeIf { it.isJsonPrimitive }?.asString
 }
 
-/** Tell the page it is in IntelliJ, with theme + locale, before it boots. */
-internal fun withPreset(html: String, theme: String, locale: String = Locale.getDefault().language): String {
+/** Tell the page it is in IntelliJ, with theme + locale, before it boots.
+ * [view] picks the surface: the chat panel, or the Settings editor tab. */
+internal fun withPreset(
+    html: String,
+    theme: String,
+    locale: String = Locale.getDefault().language,
+    view: String? = null,
+): String {
     val safeTheme = theme.replace("\"", "")
     val safeLocale = locale.replace("\"", "")
+    val viewProp = view?.let { ",view:\"${it.replace("\"", "")}\"" }.orEmpty()
     val preset =
-        "<script>window.__codepilotHost={kind:\"idea\",theme:\"$safeTheme\",locale:\"$safeLocale\"}</script>"
+        "<script>window.__codepilotHost={kind:\"idea\",theme:\"$safeTheme\",locale:\"$safeLocale\"$viewProp}</script>"
     val at = html.indexOf("<head>")
     return if (at < 0) preset + html else html.substring(0, at + 6) + preset + html.substring(at + 6)
 }

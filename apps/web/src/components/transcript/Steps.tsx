@@ -72,14 +72,16 @@ export function StepGroup({ tools, live }: { tools: ToolRow[]; live: boolean }):
       </button>
       {open && (
         <ul className="border-t border-[var(--color-edge-subtle)] py-1">
+          {/* Inline chips under each `task` so later parent tools in the same
+           * merged group stay *below* the subagent block (not above it). */}
           {tools.map((tool) => (
-            <StepItem key={tool.id} tool={tool} showSubagents={false} />
+            <StepItem key={tool.id} tool={tool} showSubagents />
           ))}
         </ul>
       )}
-      {/* Always reachable after the main turn finishes — even if the step list is folded. */}
-      {taskTools.length > 0 && (
-        <div className={`space-y-1 px-2 pb-2 ${open ? "pt-0" : "border-t border-[var(--color-edge-subtle)] pt-1.5"}`}>
+      {/* Folded group: keep chips reachable without expanding the whole list. */}
+      {!open && taskTools.length > 0 && (
+        <div className="space-y-1 border-t border-[var(--color-edge-subtle)] px-2 pt-1.5 pb-2">
           {taskTools.map((tool) => (
             <SubagentChips key={tool.id} toolCallId={tool.id} />
           ))}
@@ -115,7 +117,7 @@ function SubagentChips({ toolCallId }: { toolCallId: string }): React.ReactEleme
         const last = [...r.view.rows].reverse().find((x) => x.kind === "tool");
         const doing =
           r.state === "running" && last?.kind === "tool"
-            ? toolTarget(last.tool.input) || toolVerb(last.tool.name, last.tool.input)
+            ? toolTarget(last.tool.input, last.tool.name) || toolVerb(last.tool.name, last.tool.input)
             : "";
         const statusLabel =
           r.state === "running" ? t("Running") : r.state === "failed" ? t("failed") : t("done");
@@ -184,13 +186,16 @@ function StepItem({
   showSubagents = true,
 }: {
   tool: ToolRow;
-  /** When false, parent (StepGroup) already renders SubagentChips. */
+  /** When false, omit inline SubagentChips (folded StepGroup paints them once). */
   showSubagents?: boolean;
 }): React.ReactElement {
-  const [open, setOpen] = useState(false);
+  // Failed steps open by default so the error text is one click away (or
+  // already visible) — a buried "input" JSON alone does not explain a failure.
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? tool.status === "error";
   const onOpenPath = useContext(OpenPathContext);
   const paths = toolFilePaths(tool.input);
-  const target = toolTarget(tool.input);
+  const target = toolTarget(tool.input, tool.name);
   const verb = toolVerb(tool.name, tool.input);
   const duration =
     tool.startedAt && tool.finishedAt ? formatDuration(tool.finishedAt - tool.startedAt) : undefined;
@@ -198,7 +203,7 @@ function StepItem({
     <li>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setUserOpen(!open)}
         className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-[var(--color-surface-hover)]"
       >
         <span
@@ -320,6 +325,12 @@ export function formatInput(input: unknown): string {
         parts.push(`stdin:\n${o.input}`);
       }
       return parts.join("\n\n");
+    }
+    // task control: human lines instead of raw { action, session_id } JSON.
+    if (typeof o.action === "string" && (o.action === "wait" || o.action === "interrupt" || o.action === "list")) {
+      if (o.action === "list") return "action: list";
+      const sid = typeof o.session_id === "string" ? o.session_id : "";
+      return sid ? `action: ${o.action}\nsession: ${sid}` : `action: ${o.action}`;
     }
     if (typeof o.command === "string") return o.command;
     if (typeof o.path === "string") return o.path;

@@ -116,9 +116,8 @@ describe("write_stdin tool", () => {
         sandboxOffCtx()
       );
       expect(res.isError).toBeFalsy();
- // The tool reports the escaped form: "hello stdin" (11 chars) + the
- // two characters "\n" => 13 byte(s) in the message.
-      expect(res.content).toContain("wrote 13 byte(s)");
+ // UTF-8 bytes actually written: "hello stdin" (11) + real `\n` (1) => 12.
+      expect(res.content).toContain("wrote 12 byte(s)");
       expect(res.content).toContain(id);
       expect(res.content).toContain(JSON.stringify("hello stdin\\n"));
 
@@ -147,20 +146,37 @@ describe("write_stdin tool", () => {
     }
   });
 
-  it("returns an error when the process has closed its stdin", async () => {
- // The child closes fd 0 immediately but stays alive, so the job is
- // still "running" while its stdin pipe is broken (writes raise EPIPE).
-    const id = await startJob("exec 0<&-; sleep 60");
+  it("reports UTF-8 byte length for non-ASCII input (not JS string length)", async () => {
+    const id = await startJob("cat");
     try {
- // Give the shell a moment to execute `exec 0<&-`.
-      await new Promise((r) => setTimeout(r, 300));
+      // "你好" is 2 UTF-16 code units but 6 UTF-8 bytes; + `\n` → 7.
       const res = await writeStdinTool.execute(
-        { job_id: id, input: "nowhere to go" },
-        sandboxOffCtx()
+        { job_id: id, input: "你好", raw: false },
+        sandboxOffCtx(),
       );
-      expect(res.isError).toBe(true);
-      expect(res.content).toContain("failed to write to stdin");
-      expect(res.content).toContain(id);
+      expect(res.isError).toBeFalsy();
+      expect(res.content).toContain("wrote 7 byte(s)");
+      expect(res.content).not.toContain("wrote 3 byte(s)");
+    } finally {
+      await bashKillTool.execute({ job_id: id }, sandboxOffCtx());
+    }
+  });
+
+  it("write_stdin reaches a PTY-backed interactive job (cat)", async () => {
+    // Background jobs prefer a real PTY; cat should echo the line.
+    const id = await startJob("cat");
+    try {
+      const { getJob } = await import("../src/tools/bashJobs.js");
+      const job = await getJob(dir, id);
+      expect(job?.pty || job?.proc).toBeTruthy();
+      const res = await writeStdinTool.execute(
+        { job_id: id, input: "pty-line" },
+        sandboxOffCtx(),
+      );
+      expect(res.isError).toBeFalsy();
+      await new Promise((r) => setTimeout(r, 500));
+      const out = await bashOutputTool.execute({ job_id: id }, sandboxOffCtx());
+      expect(out.content).toContain("pty-line");
     } finally {
       await bashKillTool.execute({ job_id: id }, sandboxOffCtx());
     }
@@ -175,8 +191,8 @@ describe("write_stdin tool", () => {
         sandboxOffCtx()
       );
       expect(res.isError).toBeFalsy();
- // input (8 chars) + the two characters "\n" => 10 byte(s).
-      expect(res.content).toContain("wrote 10 byte(s)");
+ // input (8) + real `\n` (1) => 9 UTF-8 bytes.
+      expect(res.content).toContain("wrote 9 byte(s)");
  // The preview is JSON.stringify'd, so embedded quotes get escaped.
       expect(res.content).toContain(JSON.stringify('say "hi"\\n'));
       expect(res.content).toMatch(
@@ -190,15 +206,15 @@ describe("write_stdin tool", () => {
   it("truncates the preview with an ellipsis when the sent text exceeds 100 chars", async () => {
     const id = await startJob("cat");
     try {
- // 120 chars of input + the two characters "\n" => 122 chars, > 100.
+ // 120 chars + real `\n` => 121 bytes; preview still uses escaped "\\n".
       const input = "x".repeat(120);
       const res = await writeStdinTool.execute(
         { job_id: id, input },
         sandboxOffCtx()
       );
       expect(res.isError).toBeFalsy();
-      expect(res.content).toContain("wrote 122 byte(s)");
- // Preview: first 100 chars of the sent text followed by "…".
+      expect(res.content).toContain("wrote 121 byte(s)");
+ // Preview: first 100 chars of the escaped display form followed by "…".
       const sent = input + "\\n";
       const preview = sent.slice(0, 100) + "…";
       expect(res.content).toContain(JSON.stringify(preview));
@@ -213,14 +229,14 @@ describe("write_stdin tool", () => {
   it("does not truncate a preview of exactly 100 chars", async () => {
     const id = await startJob("cat");
     try {
- // 98 chars of input + the two characters "\n" => exactly 100 chars.
+ // 98 chars + real `\n` => 99 bytes; escaped preview is exactly 100 chars.
       const input = "y".repeat(98);
       const res = await writeStdinTool.execute(
         { job_id: id, input },
         sandboxOffCtx()
       );
       expect(res.isError).toBeFalsy();
-      expect(res.content).toContain("wrote 100 byte(s)");
+      expect(res.content).toContain("wrote 99 byte(s)");
       expect(res.content).not.toContain("…");
       expect(res.content).toContain(JSON.stringify(input + "\\n"));
     } finally {

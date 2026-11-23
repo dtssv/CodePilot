@@ -4,6 +4,7 @@ import type {
   DiagnosticsProvider,
   Event,
   PermissionMode,
+  PermissionPresetName,
   Session,
 } from "@codepilot/core";
 import {
@@ -16,6 +17,12 @@ import {
   loadCwdFromDisk,
   normalizeCwd,
   loadConfigWithSources,
+  exportSession,
+  describeHooks,
+  formatHooks,
+  describeAgents,
+  formatAgents,
+  PERMISSION_PRESETS,
   type RichSessionSummary,
 } from "@codepilot/core";
 import { ErrorCode, RpcError } from "../../rpc.js";
@@ -30,6 +37,7 @@ import { loadConfigSafe } from "../loadConfigSafe.js";
 import {
   liveForRequest,
   liveSessions,
+  queueSessionGoal,
   recordPendingGoal,
   registerSession,
   replayPrompts,
@@ -120,6 +128,114 @@ export async function handleSessionRedo(
   return live.session.redo();
 }
 
+const PERMISSION_MODES = new Set<PermissionMode>([
+  "ask",
+  "auto-edit",
+  "yolo",
+  "auto",
+  "dont-ask",
+]);
+
+export function handleSessionSetPermissionMode(
+  ctx: ServerContext,
+  params: { sessionId: string; mode: PermissionMode },
+): { mode: PermissionMode } {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  if (!PERMISSION_MODES.has(params.mode)) {
+    throw new RpcError(
+      ErrorCode.InvalidParams,
+      `mode must be one of: ${[...PERMISSION_MODES].join(", ")}`,
+    );
+  }
+  const session = liveSessionOrThrow(ctx, params.sessionId);
+  return { mode: session.setPermissionMode(params.mode) };
+}
+
+export function handleSessionSetPreset(
+  ctx: ServerContext,
+  params: { sessionId: string; preset: PermissionPresetName },
+): {
+  preset: PermissionPresetName;
+  permissionMode: PermissionMode;
+  sandbox: { mode: string; unavailable?: boolean; backend?: string };
+} {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  if (!(params.preset in PERMISSION_PRESETS)) {
+    throw new RpcError(
+      ErrorCode.InvalidParams,
+      `preset must be one of: ${Object.keys(PERMISSION_PRESETS).join(", ")}`,
+    );
+  }
+  const session = liveSessionOrThrow(ctx, params.sessionId);
+  const out = session.setPreset(params.preset);
+  return {
+    preset: out.preset,
+    permissionMode: out.permissionMode,
+    sandbox: {
+      mode: out.sandbox.mode,
+      unavailable: out.sandbox.unavailable,
+      backend: out.sandbox.backend,
+    },
+  };
+}
+
+export async function handleSessionExport(
+  ctx: ServerContext,
+  params: { sessionId: string; format?: "markdown" | "jsonl" },
+): Promise<{ format: "markdown" | "jsonl"; body: string; suggestedName: string }> {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  await assertSessionInGrantScope(ctx, params.sessionId);
+  const format = params.format === "jsonl" ? "jsonl" : "markdown";
+  const body = await exportSession(params.sessionId, format);
+  const ext = format === "jsonl" ? "jsonl" : "md";
+  return {
+    format,
+    body,
+    suggestedName: `codepilot-session-${params.sessionId}.${ext}`,
+  };
+}
+
+export function handleSessionGoal(
+  ctx: ServerContext,
+  params: { sessionId: string; objective: string; maxRounds?: number },
+): { accepted: true; running: boolean } {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  const objective = typeof params.objective === "string" ? params.objective.trim() : "";
+  if (!objective) throw new RpcError(ErrorCode.InvalidParams, "objective required");
+  const session = liveSessionOrThrow(ctx, params.sessionId);
+  return queueSessionGoal(ctx, session, {
+    objective,
+    ...(typeof params.maxRounds === "number" ? { maxRounds: params.maxRounds } : {}),
+  });
+}
+
+export function handleSessionDescribeHooks(
+  ctx: ServerContext,
+  params: { sessionId: string },
+): { text: string } {
+  assertInitialized(ctx);
+  if (!params?.sessionId) throw new RpcError(ErrorCode.InvalidParams, "sessionId required");
+  const session = liveSessionOrThrow(ctx, params.sessionId);
+  return { text: formatHooks(describeHooks(session.getHookEngine())) };
+}
+
+export async function handleSessionDescribeAgents(
+  ctx: ServerContext,
+  params: { sessionId?: string; cwd?: string },
+): Promise<{ text: string }> {
+  assertInitialized(ctx);
+  let cwd = params?.cwd;
+  if (!cwd && params?.sessionId) {
+    cwd = liveSessionOrThrow(ctx, params.sessionId).getCwd();
+  }
+  if (!cwd) cwd = ctx.defaultCwd;
+  return { text: formatAgents(await describeAgents(cwd)) };
+}
+
 export async function handleSessionNew(
   ctx: ServerContext,
   params: SessionNewParams,
@@ -136,7 +252,10 @@ export async function handleSessionNew(
   const session = await createSession({
     cwd,
     config: effectiveConfig,
-    model: params?.model ?? config?.model,
+    // Only pin when the client passes a model: a `config.model` fallback here
+    // bypasses createSession's sticky resolution, so "New session" would snap
+    // back to the configured default instead of the model just used.
+    ...(params?.model ? { model: params.model } : {}),
     systemPromptExtra: params?.systemPromptExtra,
     agentMode: params?.agentMode ?? effectiveConfig.agentMode,
     ...(ctx.lockIdentity ? { lockIdentity: ctx.lockIdentity } : {}),

@@ -19,15 +19,18 @@ export interface CommandCandidate {
   name: string;
   description: string;
   argumentHint?: string;
-  source: "builtin" | "project" | "user" | "plugin";
+  source: "builtin" | "project" | "user" | "plugin" | "mcp";
   /** "local" = client action; "prompt" = expands into a model turn. */
   kind: "local" | "prompt";
 }
 
 export interface MenuProvider {
   listCommands(): Promise<CommandCandidate[]>;
-  /** Fetch candidates for one chosen category. */
-  complete(query: string, kind: CompletionKind): Promise<MentionCandidate[]>;
+  /** Fetch candidates for one chosen category. `truncated` when more matches exist. */
+  complete(
+    query: string,
+    kind: CompletionKind,
+  ): Promise<{ candidates: MentionCandidate[]; truncated?: boolean }>;
 }
 
 /** Category rows shown when the user typed `@` but hasn't chosen a kind yet. */
@@ -96,8 +99,10 @@ interface Row {
   primary: string;
   secondary?: string;
   badge?: string;
-  /** Category rows keep the menu open (they only narrow the kind). */
+  /** Category / directory rows keep the menu open (they only narrow the path). */
   keepOpen?: boolean;
+  /** Non-selectable hint row (e.g. truncated footer). */
+  disabled?: boolean;
 }
 
 const KIND_BADGE: Record<CompletionKind, string> = {
@@ -166,13 +171,35 @@ export function MentionMenu({ trigger, provider, onPick, onClose }: MentionMenuP
           }));
           if (id === reqId.current) setRows(cats);
         } else {
-          const cands = await provider.complete(trigger.query, trigger.atKind);
-          const mapped = cands.slice(0, 50).map<Row>((c) => ({
-            insert: `@${c.value} `,
-            primary: c.label,
-            secondary: c.detail,
-            badge: KIND_BADGE[c.kind],
-          }));
+          const { candidates, truncated } = await provider.complete(trigger.query, trigger.atKind);
+          const atKind = trigger.atKind;
+          const mapped = candidates.map<Row>((c) => {
+            // Directory drill-in: stay in the same @kind: and append path/ so the
+            // next fetch is path-scoped. Files (and other kinds) close the menu.
+            if (c.kind === "dir") {
+              const path = c.value.endsWith("/") ? c.value : `${c.value}/`;
+              return {
+                insert: `@${atKind}:${path}`,
+                primary: c.label,
+                secondary: c.detail ?? "open folder",
+                badge: KIND_BADGE.dir,
+                keepOpen: true,
+              };
+            }
+            return {
+              insert: `@${c.value} `,
+              primary: c.label,
+              secondary: c.detail,
+              badge: KIND_BADGE[c.kind],
+            };
+          });
+          if (truncated) {
+            mapped.push({
+              insert: "",
+              primary: "More matches — keep typing or open a folder",
+              disabled: true,
+            });
+          }
           if (id === reqId.current) setRows(mapped);
         }
         if (id === reqId.current) setActive(0);
@@ -195,11 +222,30 @@ export function MentionMenu({ trigger, provider, onPick, onClose }: MentionMenuP
   (MentionMenu as unknown as { _activeHandler?: (e: KeyboardEvent | React.KeyboardEvent) => boolean })._activeHandler =
     (e) => {
       if (!trigger || rows.length === 0) return false;
-      if (e.key === "ArrowDown") { setActive((a) => (a + 1) % rows.length); return true; }
-      if (e.key === "ArrowUp") { setActive((a) => (a - 1 + rows.length) % rows.length); return true; }
+      const selectable = () => {
+        const idxs = rows.map((r, i) => (r.disabled ? -1 : i)).filter((i) => i >= 0);
+        return idxs;
+      };
+      if (e.key === "ArrowDown") {
+        const idxs = selectable();
+        if (idxs.length === 0) return true;
+        const pos = idxs.indexOf(active);
+        setActive(idxs[(pos + 1) % idxs.length]!);
+        return true;
+      }
+      if (e.key === "ArrowUp") {
+        const idxs = selectable();
+        if (idxs.length === 0) return true;
+        const pos = idxs.indexOf(active);
+        setActive(idxs[(pos - 1 + idxs.length) % idxs.length]!);
+        return true;
+      }
       if (e.key === "Enter" || e.key === "Tab") {
         const row = rows[active];
-        if (row) { onPick({ insert: row.insert, keepOpen: row.keepOpen }); return true; }
+        if (row && !row.disabled) {
+          onPick({ insert: row.insert, keepOpen: row.keepOpen });
+          return true;
+        }
       }
       if (e.key === "Escape") { onClose(); return true; }
       return false;
@@ -213,30 +259,43 @@ export function MentionMenu({ trigger, provider, onPick, onClose }: MentionMenuP
       className="absolute bottom-full left-2 right-2 z-20 mb-1 max-h-64 overflow-auto rounded-lg border border-[var(--color-edge)] bg-[var(--color-surface)] py-1 shadow-lg"
       role="listbox"
     >
-      {rows.map((r, i) => (
-        <button
-          key={r.insert}
-          type="button"
-          role="option"
-          data-index={i}
-          aria-selected={i === active}
-          onMouseDown={(e) => { e.preventDefault(); onPick({ insert: r.insert, keepOpen: r.keepOpen }); }}
-          onMouseEnter={() => setActive(i)}
-          className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] ${
-            i === active ? "bg-[var(--color-surface-sunken)]" : ""
-          }`}
-        >
-          <span className="truncate font-medium text-[var(--color-ink)]">{r.primary}</span>
-          {r.badge && (
-            <span className="shrink-0 rounded bg-[var(--color-surface-sunken)] px-1 text-[10px] text-[var(--color-ink-dim)]">
-              {r.badge}
-            </span>
-          )}
-          {r.secondary && (
-            <span className="ml-auto truncate text-[11px] text-[var(--color-ink-faint)]">{r.secondary}</span>
-          )}
-        </button>
-      ))}
+      {rows.map((r, i) =>
+        r.disabled ? (
+          <div
+            key={`hint-${i}`}
+            data-index={i}
+            className="px-3 py-1.5 text-[11px] text-[var(--color-ink-faint)]"
+          >
+            {r.primary}
+          </div>
+        ) : (
+          <button
+            key={`${r.insert}-${i}`}
+            type="button"
+            role="option"
+            data-index={i}
+            aria-selected={i === active}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              onPick({ insert: r.insert, keepOpen: r.keepOpen });
+            }}
+            onMouseEnter={() => setActive(i)}
+            className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12.5px] ${
+              i === active ? "bg-[var(--color-surface-sunken)]" : ""
+            }`}
+          >
+            <span className="truncate font-medium text-[var(--color-ink)]">{r.primary}</span>
+            {r.badge && (
+              <span className="shrink-0 rounded bg-[var(--color-surface-sunken)] px-1 text-[10px] text-[var(--color-ink-dim)]">
+                {r.badge}
+              </span>
+            )}
+            {r.secondary && (
+              <span className="ml-auto truncate text-[11px] text-[var(--color-ink-faint)]">{r.secondary}</span>
+            )}
+          </button>
+        ),
+      )}
     </div>
   );
 }

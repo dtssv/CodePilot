@@ -12,7 +12,9 @@ import type {
 import { describeError } from "../../protocol/client.js";
 import { t } from "../../i18n.js";
 import { PlusIcon, RefreshIcon, XIcon } from "../Icons.js";
-import type { Layout, Theme, ThemeName } from "../../surface.js";
+import type { Locale } from "../../i18n.js";
+import type { Layout, ThemeName, ThemePreference } from "../../surface.js";
+import type { PanelPosition } from "./GeneralSection.js";
 import { SettingsExtras } from "./SettingsExtras.js";
 import { Field } from "./SettingsField.js";
 import type {
@@ -48,10 +50,13 @@ export function SettingsPanel({
   open,
   onClose,
   onComposePrompt,
-  theme,
+  themePreference,
   onTheme,
   themeName,
   onThemeName,
+  onLocale,
+  panelPosition,
+  onPanelPosition,
   layout,
   onLayout,
 }: {
@@ -60,10 +65,13 @@ export function SettingsPanel({
   onClose(): void;
   /** Prefill the main composer (e.g. skill-creator) and close settings. */
   onComposePrompt?: (text: string) => void;
-  theme: Theme;
-  onTheme(theme: Theme): void;
+  themePreference: ThemePreference;
+  onTheme(theme: ThemePreference): void;
   themeName: ThemeName;
   onThemeName(name: ThemeName): void;
+  onLocale(locale: Locale): void;
+  panelPosition?: PanelPosition;
+  onPanelPosition?(position: PanelPosition): void;
   layout: Layout;
   onLayout(layout: Layout): void;
 }): React.ReactElement | null {
@@ -93,6 +101,22 @@ export function SettingsPanel({
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateMsg, setUpdateMsg] = useState<string | undefined>();
   const [nav, setNav] = useState<SettingsNav>("general");
+  // Embedded sheet width — must stay with other hooks (never after `!open` return).
+  const [widePane, setWidePane] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(min-width: 720px)").matches : true,
+  );
+
+  useEffect(() => {
+    const onNav = (ev: Event): void => {
+      const section = (ev as CustomEvent<{ section?: string }>).detail?.section;
+      // Capabilities live in FeatureDialog; Settings only keeps config + plugins.
+      if (section === "general" || section === "models" || section === "plugins") {
+        setNav(section);
+      }
+    };
+    window.addEventListener("codepilot:settings-nav", onNav);
+    return () => window.removeEventListener("codepilot:settings-nav", onNav);
+  }, []);
   const protocol = providerFromWire(wire);
 
   const rows = useMemo(() => buildEndpointRows(snap), [snap]);
@@ -237,6 +261,17 @@ export function SettingsPanel({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+
+  // Embedded (IDE plugin) full-bleed sheet: stack models panes when narrow;
+  // side-by-side once wide enough (VS Code Settings editor, IDEA stretchWidth).
+  useEffect(() => {
+    if (typeof window === "undefined" || !open) return;
+    const mq = window.matchMedia("(min-width: 720px)");
+    const apply = (): void => setWidePane(mq.matches);
+    apply();
+    mq.addEventListener("change", apply);
+    return () => mq.removeEventListener("change", apply);
+  }, [open]);
 
   if (!open) return null;
 
@@ -517,10 +552,8 @@ export function SettingsPanel({
     (tmpl) => !tmpl.requiresBaseURL && tmpl.provider !== "copilot",
   );
   const customTemplates = mergeCustomTemplates(snap?.templates ?? []);
-  // IDE sidebar/tool-window: full-bleed sheet over the chat (no new IDE tab),
-  // stacked models panes so the narrow width stays usable — same store as Desktop.
-  const sheet = layout === "embedded";
-  const fill = sheet;
+  const fill = layout === "embedded";
+  const sheet = fill && !widePane;
 
   return (
     <div
@@ -545,9 +578,6 @@ export function SettingsPanel({
         <div className="flex h-12 shrink-0 items-center gap-2 border-b border-[var(--color-edge-subtle)] px-3 sm:px-4">
           <div className="min-w-0 flex-1">
             <div className="text-[13.5px] font-semibold text-[var(--color-ink)]">{t("Settings")}</div>
-            <div className="truncate text-[10.5px] text-[var(--color-ink-faint)]">
-              {t("Saved to ~/.codepilot/config.json")}
-            </div>
           </div>
           <div className="ml-auto flex items-center gap-1">
             <button type="button" className="cp-icon-btn" title={t("Refresh")} onClick={() => void reload()}>
@@ -564,12 +594,7 @@ export function SettingsPanel({
             [
               ["general", t("General")],
               ["models", t("Models")],
-              ["connectors", t("Connectors")],
-              ["custom-mcp", t("Custom connectors")],
               ["plugins", t("Plugins")],
-              ["skills", t("Skills")],
-              ["remote", t("Remote")],
-              ["schedule", t("Schedule")],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -598,10 +623,13 @@ export function SettingsPanel({
           <SettingsExtras
             cp={cp}
             section={nav}
-            theme={theme}
+            themePreference={themePreference}
             onTheme={onTheme}
             themeName={themeName}
             onThemeName={onThemeName}
+            onLocale={onLocale}
+            panelPosition={panelPosition}
+            onPanelPosition={onPanelPosition}
             layout={layout}
             onLayout={onLayout}
             onComposePrompt={(text) => {
@@ -680,9 +708,6 @@ export function SettingsPanel({
                     >
                       <span className="text-[12px] text-[var(--color-ink)]">
                         {templateLabel(tmpl)}
-                      </span>
-                      <span className="text-[10.5px] text-[var(--color-ink-faint)]">
-                        {t("Adds another key / endpoint")}
                       </span>
                     </button>
                   ))}
@@ -840,9 +865,6 @@ export function SettingsPanel({
                         {t("Add header")}
                       </button>
                     </div>
-                    <div className="mt-1 text-[10.5px] text-[var(--color-ink-faint)]">
-                      {t("Optional. Merged into every request (auth still wins).")}
-                    </div>
                   </div>
                 )}
 
@@ -856,9 +878,6 @@ export function SettingsPanel({
                   >
                     {fetching ? t("Fetching…") : t("Fetch models")}
                   </button>
-                  <span className="text-[11px] text-[var(--color-ink-faint)]">
-                    {t("Then tick the models you want in the picker.")}
-                  </span>
                 </div>
 
                 <div>

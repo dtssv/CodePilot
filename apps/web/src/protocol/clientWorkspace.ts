@@ -47,12 +47,27 @@ export async function commandsList(
     name: string;
     description: string;
     argumentHint?: string;
-    source: "builtin" | "project" | "user" | "plugin";
+    source: "builtin" | "project" | "user" | "plugin" | "mcp";
     kind: "local" | "prompt";
   }>;
   warnings: string[];
 }> {
   return host.call("commands/list", { cwd });
+}
+
+/** Expand a prompt-kind slash command (markdown body or MCP prompts/get). */
+export async function commandsExpand(
+  host: ClientRpcHost,
+  name: string,
+  args?: string,
+  cwd?: string,
+): Promise<{
+  prompt: string;
+  model?: string;
+  allowedTools?: string[];
+  source: "builtin" | "project" | "user" | "plugin" | "mcp";
+}> {
+  return host.call("commands/expand", { name, args, cwd });
 }
 
 /** `@`-mention completion candidates (file/dir/mcp/git/skill). */
@@ -62,6 +77,7 @@ export async function workspaceComplete(
   opts: { kinds?: Array<"file" | "dir" | "mcp" | "git" | "skill">; maxResults?: number; cwd?: string } = {},
 ): Promise<{
   candidates: Array<{ kind: "file" | "dir" | "mcp" | "git" | "skill"; value: string; label: string; detail?: string }>;
+  truncated?: boolean;
 }> {
   return host.call("workspace/complete", { query, ...opts });
 }

@@ -14,6 +14,7 @@ import type {
   ToolUseBlock,
 } from "../types.js";
 import { filterToolsByMode } from "../tools/modes.js";
+import { executeLeafTool } from "../tools/executeLeaf.js";
 import { PermissionEngine } from "../permissions/permissions.js";
 import type { HookEngine } from "../hooks/hooks.js";
 import { DoomLoopDetector } from "./doomLoop.js";
@@ -117,10 +118,9 @@ export async function runOneTool(
     };
   }
 
- // Mode gating: refuse tools that the current collaboration mode forbids.
- // This is a defence-in-depth check — the provider also shouldn't see them
- // — but if a previous turn's mode was changed, an in-flight call could
- // otherwise reach a forbidden tool.
+ // Mode gating: the tools array is session-monotonic, so chat/plan may still
+ // *see* schemas from an earlier agent turn — this deny is the real boundary.
+ // Also covers in-flight calls after a mid-run mode switch.
   const visible = filterToolsByMode([tool], mode);
   if (visible.length === 0) {
     endToolSpan(new Error(`tool ${tc.name} is not allowed in ${mode} mode`));
@@ -325,17 +325,24 @@ export async function runOneTool(
       // "bash(npm test *)") rather than allowing every call to this tool. deny
       // rules still override — checked first in preflight, absolute even under yolo.
         const rule = PermissionEngine.suggestRule(tool, effectiveInput);
-        deps.permissions.addSessionRule(rule, "allow");
+        const escalated = !!req.sandboxEscalation;
+        if (escalated) {
+          // Jail-drop Always: escalation-scoped session grant only. Do not
+          // persist to project config (higher stakes than a sandboxed allow).
+          deps.permissions.addSessionEscalationRule(rule);
+        } else {
+          deps.permissions.addSessionRule(rule, "allow");
  // "always-project" also persists the SAME narrowed rule to the project
  // config so it auto-applies in future sessions. Best-effort: a write
  // failure must not fail the tool call — the session grant above already
  // covers the rest of this session.
-        if (decision === "always-project") {
-          try {
-            const { persistRule } = await import("../permissions/permissions.js");
-            await persistRule(deps.cwd, rule, "allow", "repo");
-          } catch {
+          if (decision === "always-project") {
+            try {
+              const { persistRule } = await import("../permissions/permissions.js");
+              await persistRule(deps.cwd, rule, "allow", "repo");
+            } catch {
  /* persistence is opt-in sugar; never block the tool on it */
+            }
           }
         }
         decision = "allow";
@@ -435,7 +442,6 @@ export async function runOneTool(
     readArtifact: async (ref) => deps.artifacts.read(ref),
     sandbox: deps.sandbox,
     askUser: deps.onAskUser,
-    persistentShell: deps.persistentShell,
     diagnosticsProvider: deps.diagnosticsProvider,
     config: deps.config,
     subagentDepth: deps.subagentDepth ?? 0,
@@ -451,7 +457,10 @@ export async function runOneTool(
     addDeliveryRoot: deps.addDeliveryRoot,
     expandSandboxWritable: deps.expandSandboxWritable,
     observeFile: deps.fileObservations
-      ? (p, s, h) => deps.fileObservations!.observe(p, s, h)
+      ? (p, s, h, w) => deps.fileObservations!.observe(p, s, h, w)
+      : undefined,
+    isUnchangedRead: deps.fileObservations
+      ? (p, w, s) => deps.fileObservations!.isUnchangedRead(p, w, s)
       : undefined,
     checkFileFresh: deps.fileObservations
       ? (p, s, h, opts) => deps.fileObservations!.checkFresh(p, s, h, opts)
@@ -460,7 +469,20 @@ export async function runOneTool(
       ? (p, s, h) => deps.fileObservations!.reobserveAfterWrite(p, s, h)
       : undefined,
     postWrite: deps.postWrite,
+    agentMode: mode,
   };
+  // Nested deferred calls from code_mode.tools.call — full permission path,
+  // no separate tool_started transcript entries (outer code_mode owns the turn).
+  ctx.callDeferredTool = async (name, args) =>
+    executeLeafTool(name, args, {
+      tools: deps.tools,
+      mode,
+      permissions: deps.permissions,
+      hooks: deps.hooks,
+      onPermissionRequest: deps.onPermissionRequest,
+      ctx,
+      signal: deps.signal,
+    });
 
   // Mark the call as started: permission is granted, PreToolUse hooks passed,
   // and input validated — execution is now imminent. If the process is killed

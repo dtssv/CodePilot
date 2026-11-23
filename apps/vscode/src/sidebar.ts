@@ -13,6 +13,8 @@ import * as vscode from "vscode";
 import type { Engine } from "./engine.js";
 import { nls } from "./nls.js";
 import type { AgentMode } from "./types.js";
+import { readPanelPosition } from "./panelPosition.js";
+import { loadUiPrefs, mergeUiPrefs, type UiPrefs } from "./uiPrefs.js";
 
 export type HostCommand = { name: "new" } | { name: "cancel" } | { name: "mode"; mode: AgentMode };
 
@@ -26,6 +28,8 @@ export interface ChatViewOptions {
   onSetCwd?(cwd: string): void;
  /** Open Settings in a wide editor WebviewPanel (sidebar cannot set exact width). */
   onOpenWideSettings?(): void | Promise<void>;
+ /** Broadcast UI prefs to every CodePilot webview (chat + Settings). */
+  onUiPrefs?(prefs: UiPrefs): void;
  /** Called after the engine (re)started on the webview's request. */
   onEngineError?(message: string): void;
   log?(line: string): void;
@@ -39,7 +43,8 @@ type FromWebview =
   | { type: "insertText"; text: string }
   | { type: "setCwd"; cwd: string }
   | { type: "openSettings" }
-  | { type: "closeSettings" };
+  | { type: "closeSettings" }
+  | { type: "prefs/set"; prefs: UiPrefs };
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view: vscode.WebviewView | null = null;
@@ -72,9 +77,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
- /** Put text into the composer, or send it right away. */
-  prompt(text: string, send: boolean): void {
-    this.post({ type: "host/prompt", text, send });
+ /** Put text / structured refs into the composer, or send right away. */
+  prompt(
+    text: string,
+    send: boolean,
+    refs?: Array<{ path: string; startLine?: number; endLine?: number }>,
+  ): void {
+    this.post({ type: "host/prompt", text, send, ...(refs?.length ? { refs } : {}) });
   }
 
   command(cmd: HostCommand): void {
@@ -89,14 +98,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** Push the current workspace root(s) to the UI (folder open/close/switch). */
   notifyWorkspace(cwd: string, folderList?: string[]): void {
     const folders = folderList ?? this.opts.folders();
+    const prefs: UiPrefs = { ...loadUiPrefs(this.ctx), panelPosition: readPanelPosition() };
     this.post({
       type: "host/init",
       cwd,
       folders,
+      // Always the IDE chrome theme — UI preference (incl. system) lives in prefs.
       theme: themeOf(vscode.window.activeColorTheme?.kind),
-      locale: vscode.env?.language,
+      locale: prefs.locale ?? vscode.env?.language,
       surface: "vscode",
+      prefs,
     });
+  }
+
+  /** Apply prefs from the extension host / sibling Settings webview. */
+  applyUiPrefs(prefs: UiPrefs): void {
+    this.post({ type: "host/prefs", prefs });
   }
 
   dispose(): void {
@@ -136,6 +153,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         void this.opts.onOpenWideSettings?.();
         return;
       case "closeSettings":
+        return;
+      case "prefs/set":
+        if (msg.prefs && typeof msg.prefs === "object") {
+          const merged = mergeUiPrefs(this.ctx, msg.prefs);
+          this.opts.onUiPrefs?.(merged);
+        }
         return;
     }
   }
@@ -235,25 +258,34 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private renderHtml(cspSource: string): string {
     const file = vscode.Uri.joinPath(this.ctx.extensionUri, "media", "webview", "index.html").fsPath;
     if (!existsSync(file)) return missingBuildHtml(cspSource);
+    const nonce = randomBytes(16).toString("base64");
     const locale = vscode.env.language || "en";
     const theme = themeOf(vscode.window.activeColorTheme?.kind);
-    const boot =
-      `<script>window.__codepilotHost=${JSON.stringify({
-        kind: "vscode",
-        locale,
-        theme,
-        view: "chat",
-      })};</script>`;
+    // Boot must be minted with the nonce already — a global `<script` rewrite
+    // would also mutate string literals inside the inlined embed bundle.
+    const boot = hostBootScript(nonce, {
+      kind: "vscode",
+      locale,
+      theme,
+      view: "chat",
+    });
     let html = readFileSync(file, "utf8");
     html = html.replace("<head>", `<head>\n${boot}`);
-    return injectCsp(html, cspSource, randomBytes(16).toString("base64"));
+    return injectCsp(html, cspSource, nonce);
   }
 }
 
-/**
- * Add the webview CSP and a nonce on the inlined module script. Inline
- * styles are needed for the bundled stylesheet and React style attributes.
- */
+/** Host boot tag (`window.__codepilotHost`) with CSP nonce already applied. */
+export function hostBootScript(
+  nonce: string,
+  host: { kind: string; locale?: string; theme?: string; view?: string },
+): string {
+  return `<script nonce="${nonce}">window.__codepilotHost=${JSON.stringify(host)};</script>`;
+}
+
+/** Add the webview CSP and a nonce to the module entry. Never rewrite every
+ * `<script` — the inlined embed JS can contain that substring and crashes.
+ * Inline styles stay allowed for the bundled stylesheet. */
 export function injectCsp(html: string, cspSource: string, nonce: string): string {
   const csp =
     `default-src 'none'; img-src ${cspSource} data: https:; font-src ${cspSource}; ` +

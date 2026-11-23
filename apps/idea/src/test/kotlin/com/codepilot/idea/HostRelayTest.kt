@@ -124,25 +124,58 @@ class HostRelayTest {
     }
 
     @Test
-    fun `openSettings expands and notifies the page`() {
-        var expanded = 0
-        var restored = 0
+    fun `openSettings asks the host to open the settings tab`() {
+        var opened = 0
         val relay = HostRelay(
             deliver = { delivered += JsonParser.parseString(it).asJsonObject },
             init = { HostInit(cwd = "/work", theme = "light", locale = "zh") },
-            onExpandForSettings = { expanded++ },
-            onRestoreAfterSettings = { restored++ },
+            onOpenSettings = { opened++ },
         ).also { it.engine = engine }
         relay.fromPage("""{"type":"ready"}""")
         delivered.clear()
         relay.fromPage("""{"type":"openSettings"}""")
-        assertEquals(1, expanded)
+        assertEquals(1, opened)
+        // Settings live in another editor tab, so this page stays as it is.
         assertTrue(delivered.isEmpty())
-        relay.openSettings()
-        assertEquals(2, expanded)
-        assertEquals("host/openSettings", delivered.single()["type"].asString)
+        // closeSettings has nothing to close in this surface.
         relay.fromPage("""{"type":"closeSettings"}""")
-        assertEquals(1, restored)
+        assertTrue(delivered.isEmpty())
+    }
+
+    @Test
+    fun `prompt attaches structured refs`() {
+        relay.fromPage("""{"type":"ready"}""")
+        delivered.clear()
+        relay.prompt("explain", send = true, refs = listOf(CodeRef("src/a.kt", 3, 9)))
+        val msg = delivered.single()
+        assertEquals("host/prompt", msg["type"].asString)
+        assertEquals("explain", msg["text"].asString)
+        assertTrue(msg["send"].asBoolean)
+        val ref = msg["refs"].asJsonArray.single().asJsonObject
+        assertEquals("src/a.kt", ref["path"].asString)
+        assertEquals(3, ref["startLine"].asInt)
+        assertEquals(9, ref["endLine"].asInt)
+    }
+
+    @Test
+    fun `prompt omits refs when there are none`() {
+        relay.fromPage("""{"type":"ready"}""")
+        delivered.clear()
+        relay.prompt("just text", send = false)
+        val msg = delivered.single()
+        assertEquals("just text", msg["text"].asString)
+        assertTrue(!msg.has("refs"))
+    }
+
+    @Test
+    fun `a whole-file ref carries no line range`() {
+        relay.fromPage("""{"type":"ready"}""")
+        delivered.clear()
+        relay.prompt("", send = false, refs = listOf(CodeRef("README.md")))
+        val ref = delivered.single()["refs"].asJsonArray.single().asJsonObject
+        assertEquals("README.md", ref["path"].asString)
+        assertTrue(!ref.has("startLine"))
+        assertTrue(!ref.has("endLine"))
     }
 
     @Test
@@ -153,6 +186,12 @@ class HostRelayTest {
                 "<html><head><script>window.__codepilotHost={kind:\"idea\",theme:\"dark\",locale:\"zh-CN\"}</script><title>",
             ),
         )
+    }
+
+    @Test
+    fun `withPreset marks the settings surface`() {
+        val out = withPreset("<html><head></head></html>", "light", "en", view = "settings")
+        assertTrue(out.contains("locale:\"en\",view:\"settings\""))
     }
 
     @Test

@@ -43,6 +43,8 @@ export type ParsedArgs = {
   attach: boolean;
   prompt?: string;
   showHelp: boolean;
+  /** Print the version and exit, without starting the UI. */
+  showVersion: boolean;
   /** Collaboration mode. */
   mode?: AgentMode;
   /** Headless / print mode. When true, skip the Ink UI
@@ -76,6 +78,7 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     local: false,
     attach: false,
     showHelp: false,
+    showVersion: false,
     print: false,
     subcommandArgs: [],
   };
@@ -113,6 +116,11 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
     const a = argv[i]!;
     if (a === "-h" || a === "--help") {
       out.showHelp = true;
+      i++;
+      continue;
+    }
+    if (a === "-v" || a === "--version") {
+      out.showVersion = true;
       i++;
       continue;
     }

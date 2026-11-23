@@ -38,6 +38,11 @@ export function stateSidecarPath(id: string): string {
   return join(SESSIONS_DIR, `${id}.state`);
 }
 
+/** Pending steers + follow-ups (`session-inbox.ts`). */
+export function inboxSidecarPath(id: string): string {
+  return join(SESSIONS_DIR, `${id}.inbox.json`);
+}
+
 /** Normalize cwd for comparison (strip trailing slashes). */
 export function normalizeCwd(cwd: string): string {
   const t = cwd.trim();

@@ -168,6 +168,22 @@ export class McpStdioClient extends BaseJsonRpcClient {
     super();
   }
 
+  /** Ring buffer of recent stderr (bytes) — not mirrored to process.stderr. */
+  private stderrTail = "";
+  private static readonly STDERR_TAIL_MAX = 32 * 1024;
+
+  /** Recent stderr for failure diagnostics (may be empty). */
+  getStderrTail(): string {
+    return this.stderrTail;
+  }
+
+  private appendStderr(chunk: string): void {
+    this.stderrTail += chunk;
+    if (this.stderrTail.length > McpStdioClient.STDERR_TAIL_MAX) {
+      this.stderrTail = this.stderrTail.slice(-McpStdioClient.STDERR_TAIL_MAX);
+    }
+  }
+
   /** Spawn the child and wire its stdio. Shared by start() and reconnect. */
   private spawnProc(): void {
     const spec = mcpSpawnSpec(this.config, this.ctx);
@@ -181,7 +197,7 @@ export class McpStdioClient extends BaseJsonRpcClient {
     proc.stdout!.on("data", (chunk: string) => this.onStdout(chunk));
     proc.stderr!.setEncoding("utf-8");
     proc.stderr!.on("data", (chunk: string) => {
-      process.stderr.write(`[mcp:${this.serverName}] ${chunk}`);
+      this.appendStderr(chunk);
     });
     // Listen for spawn-time errors (e.g. ENOENT). Without a handler Node
     // throws an uncaught exception; we need to surface the failure into

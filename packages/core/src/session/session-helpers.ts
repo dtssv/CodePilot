@@ -8,8 +8,10 @@ import { readUserConfigFile, writeUserConfigFile } from "../config/providerCatal
  * file writers, `task` workers, MCP, …) triggers the turn's base-tree capture. */
 export const NON_MUTATING_TOOLS = new Set([
   "read_file", "read_image", "read_artifact", "grep", "glob", "ls", "diagnostics", "lsp_navigate",
-  "web_fetch", "web_search", "ask_user_question", "bash_output", "goal_status", "plan_update",
-  "skill", "suggest_mode", "subagent_list", "memory_write", "start_goal", "start_new_task",
+  "web_fetch", "web_search", "ask_user_question", "bash_output",
+  "plan", "goal",
+  "skill", "suggest_mode",
+  "memory_write", "start_new_task",
 ]);
 
 /** Max consecutive Stop-hook continues before the session forces an end.

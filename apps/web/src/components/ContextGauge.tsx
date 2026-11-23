@@ -115,9 +115,10 @@ export function ContextGauge({
   // refreshes (which share this effect via `refreshKey`).
   const reportSessionRef = useRef<string | undefined>(undefined);
 
-  // Trigger-only key: refetch when the transcript grows or the run status
-  // changes (a turn just settled → the new send cost is known).
-  const refreshKey = `${state.rows.length}:${state.status}:${state.usage.input}`;
+  // Trigger-only key: refetch when the transcript grows, the run status
+  // changes (a turn just settled → the new send cost is known), or the
+  // model/endpoint changes (window caps come from the active model).
+  const refreshKey = `${state.rows.length}:${state.status}:${state.usage.input}:${state.model ?? ""}`;
 
   useEffect(() => {
     if (!sessionId || state.connection !== "connected") {
@@ -314,10 +315,10 @@ export function ContextGauge({
         title={`${t("Context window")}: ${pct.toFixed(1)}%`}
         aria-haspopup="dialog"
         aria-expanded={open}
-        className="flex items-center gap-1.5 rounded-md px-1.5 py-0.5 tabular-nums transition-colors hover:bg-[var(--color-surface-hover)]"
+        className="flex items-center gap-1 rounded-md px-1 py-0.5 tabular-nums transition-colors hover:bg-[var(--color-surface-hover)]"
       >
         <Ring fraction={frac} color={ringColor} />
-        <span className="text-[11px]" style={{ color: SEVERITY_TEXT[sev] }}>
+        <span className="text-[10.5px] font-medium" style={{ color: SEVERITY_TEXT[sev] }}>
           {pct.toFixed(0)}%
         </span>
       </button>

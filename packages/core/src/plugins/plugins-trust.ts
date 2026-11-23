@@ -1,9 +1,10 @@
 // Plugin content-trust: hash-based re-approval gate. Hashes the sensitive
-// manifest parts (hooks/mcp/runtime) at consent; on load, a mismatch skips
-// hooks and MCP servers (fail-safe) until re-confirmed. skills/agents/commands
-// are data, not gated. No recorded hash → not gated (legacy-compatible).
+// manifest parts (hooks/mcp/runtime) plus runtime module file bytes at
+// consent; on load, a mismatch skips hooks / MCP / runtime / skills until
+// re-confirmed. No recorded hash → not gated (legacy-compatible).
 
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -15,15 +16,46 @@ export function defaultPluginTrustPath(): string {
 }
 
 /**
- * Canonical content a plugin is trusted AS: only the sensitive manifest parts
- * (hooks, mcpServers, runtime). Keys are sorted for stable serialization.
+ * Resolve the relative runtime module path from a manifest `runtime` field.
  */
-export function pluginContentHash(manifest: PluginManifest): string {
-  const sensitive = {
+export function runtimeModuleRelPath(
+  runtime: PluginManifest["runtime"],
+): string | undefined {
+  if (runtime == null) return undefined;
+  if (typeof runtime === "string") return runtime;
+  return typeof runtime.module === "string" ? runtime.module : undefined;
+}
+
+/**
+ * Canonical content a plugin is trusted AS: sensitive manifest parts
+ * (hooks, mcpServers, runtime) plus the on-disk bytes of the runtime module
+ * when `pluginPath` is provided and the file exists.
+ */
+export function pluginContentHash(
+  manifest: PluginManifest,
+  pluginPath?: string,
+): string {
+  const sensitive: Record<string, unknown> = {
     hooks: manifest.hooks ?? null,
     mcpServers: manifest.mcpServers ?? null,
     runtime: manifest.runtime ?? null,
   };
+  const rel = runtimeModuleRelPath(manifest.runtime);
+  // Only fold file bytes in when they can be read. A missing module must not
+  // change the hash vs a manifest-only fingerprint (install / approve paths
+  // that omit `pluginPath` stay comparable).
+  if (pluginPath && rel) {
+    const abs = join(pluginPath, rel);
+    if (existsSync(abs)) {
+      try {
+        sensitive.runtimeModuleSha256 = createHash("sha256")
+          .update(readFileSync(abs))
+          .digest("hex");
+      } catch {
+        /* unreadable → manifest-only hash */
+      }
+    }
+  }
   return createHash("sha256").update(stableStringify(sensitive)).digest("hex");
 }
 

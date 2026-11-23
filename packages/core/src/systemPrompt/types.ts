@@ -65,6 +65,8 @@ export interface SystemPromptContext {
   environmentProvider?: EnvironmentProvider;
   /** Skills discovered for this session (stable catalog). */
   skills?: Skill[];
+  /** MCP server instructions from initialize (volatile — may change on reconnect). */
+  mcpInstructions?: Array<{ server: string; instructions: string }>;
   /**
    * When true, this prompt is for a `task` sub-agent: use a subagent profile
    * and Worker turn (not parent Collaboration Modes).

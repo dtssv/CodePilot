@@ -19,7 +19,7 @@ import type {
  */
 export function pluginSensitiveTrusted(p: Plugin, trust: PluginTrustGate | undefined): boolean {
   if (!trust) return true;
-  const hash = pluginContentHash(p.manifest);
+  const hash = pluginContentHash(p.manifest, p.path);
   if (p.source === "project" && trust.recorded) return trust.recorded(p.manifest.name) === hash;
   return trust.isTrusted(p.manifest.name, hash);
 }

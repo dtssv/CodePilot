@@ -259,7 +259,30 @@ export function parseBlocks(md: string): Block[] {
     }
     blocks.push({ kind: "paragraph", text: buf.join(" ") });
   }
-  return blocks;
+  return normalizeSectionNumbers(blocks);
+}
+
+/**
+ * Display-only: renumber `**N. …**` paragraphs under each heading so sections
+ * restart at 1 (models often keep a global counter across `##` blocks). Ordered
+ * lists already render as `j+1` per block. Without a preceding heading, bold
+ * digits are left alone.
+ */
+export function normalizeSectionNumbers(blocks: Block[]): Block[] {
+  let boldNext = 0;
+  let seenHeading = false;
+  return blocks.map((b) => {
+    if (b.kind === "heading") {
+      boldNext = 0;
+      seenHeading = true;
+      return b;
+    }
+    if (b.kind === "paragraph" && seenHeading && b.text && /^\*\*\d+\.\s+/.test(b.text)) {
+      boldNext++;
+      return { ...b, text: b.text.replace(/^\*\*\d+\.\s+/, `**${boldNext}. `) };
+    }
+    return b;
+  });
 }
 
 export interface MarkdownProps {

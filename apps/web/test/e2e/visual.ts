@@ -38,7 +38,7 @@ const SCRIPT: Turn[] = [
   {
     text: "I'll start by surveying the project and laying out a plan.",
     calls: [
-      { name: "plan_update", args: PLAN("in_progress", "pending", "pending") },
+      { name: "plan", args: { action: "update", ...PLAN("in_progress", "pending", "pending") } },
       { name: "ls", args: { path: "." } },
     ],
   },
@@ -46,7 +46,7 @@ const SCRIPT: Turn[] = [
     calls: [
       { name: "read_file", args: { path: "README.md" } },
       { name: "grep", args: { pattern: "export", path: "src" } },
-      { name: "plan_update", args: PLAN("completed", "completed", "in_progress") },
+      { name: "plan", args: { action: "update", ...PLAN("completed", "completed", "in_progress") } },
     ],
   },
   {
@@ -62,7 +62,7 @@ const SCRIPT: Turn[] = [
     ],
   },
   {
-    calls: [{ name: "plan_update", args: PLAN("completed", "completed", "completed") }],
+    calls: [{ name: "plan", args: { action: "update", ...PLAN("completed", "completed", "completed") } }],
   },
   {
     text:

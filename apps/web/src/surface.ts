@@ -5,7 +5,11 @@
 import { detectHostKind, type HostKind } from "./protocol/bridge.js";
 
 export type Layout = "web" | "agent" | "embedded";
+/** Resolved light/dark applied to the DOM. */
 export type Theme = "light" | "dark";
+/** Per-client theme choice. `system` tracks the OS or the IDE chrome theme.
+ * Local to this client — never written to ~/.codepilot config. */
+export type ThemePreference = Theme | "system";
 
 /**
  * A named colour palette layered on the light/dark axis. `default` is the
@@ -81,9 +85,18 @@ export function saveLayout(layout: Layout): void {
   if (layout !== "embedded") writeStore(LAYOUT_KEY, layout);
 }
 
-export function initialTheme(host: HostKind | null): Theme {
+/** Saved theme preference for this client (`system` when unset). */
+export function initialThemePreference(_host: HostKind | null): ThemePreference {
   const saved = readStore(THEME_KEY);
-  if (!host && (saved === "light" || saved === "dark")) return saved;
+  if (saved === "light" || saved === "dark" || saved === "system") return saved;
+  const param = safeParams().get("theme");
+  if (param === "light" || param === "dark" || param === "system") return param;
+  return "system";
+}
+
+/** Detect the OS / IDE chrome theme (used when preference is `system`). */
+export function detectSystemTheme(host: HostKind | null, hostTheme?: Theme): Theme {
+  if (hostTheme === "light" || hostTheme === "dark") return hostTheme;
   if (host === "vscode") {
     const cls = document.body.classList;
     if (cls.contains("vscode-light") || cls.contains("vscode-high-contrast-light")) return "light";
@@ -91,8 +104,6 @@ export function initialTheme(host: HostKind | null): Theme {
   }
   const preset = window.__codepilotHost?.theme;
   if (host && (preset === "light" || preset === "dark")) return preset;
-  const param = safeParams().get("theme");
-  if (param === "light" || param === "dark") return param;
   try {
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   } catch {
@@ -100,10 +111,34 @@ export function initialTheme(host: HostKind | null): Theme {
   }
 }
 
-export function applyTheme(theme: Theme, persist = false): void {
+export function resolveTheme(
+  preference: ThemePreference,
+  host: HostKind | null,
+  hostTheme?: Theme,
+): Theme {
+  if (preference === "light" || preference === "dark") return preference;
+  return detectSystemTheme(host, hostTheme);
+}
+
+/** @deprecated Prefer {@link initialThemePreference} + {@link resolveTheme}. */
+export function initialTheme(host: HostKind | null): Theme {
+  return resolveTheme(initialThemePreference(host), host);
+}
+
+export function saveThemePreference(preference: ThemePreference): void {
+  writeStore(THEME_KEY, preference);
+}
+
+export function readThemePreference(): ThemePreference | null {
+  const saved = readStore(THEME_KEY);
+  if (saved === "light" || saved === "dark" || saved === "system") return saved;
+  return null;
+}
+
+/** Apply resolved light/dark to the DOM. Persistence is via {@link saveThemePreference}. */
+export function applyTheme(theme: Theme, _persist = false): void {
   document.documentElement.dataset.theme = theme;
   document.documentElement.classList.toggle("dark", theme === "dark");
-  if (persist) writeStore(THEME_KEY, theme);
 }
 
 /** The saved named palette, or "default" when none/unknown. Named palettes are

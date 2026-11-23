@@ -31,6 +31,8 @@ export function useStickyScroll(
     const pin = (): void => {
       if (pinGen.current !== gen) return;
       if (elRef.current !== el) return;
+      // User scrolled away from the bottom — never yank them back.
+      if (!stuck.current) return;
       el.scrollTop = el.scrollHeight;
     };
     pin();
@@ -46,7 +48,13 @@ export function useStickyScroll(
   const onScroll = useCallback(() => {
     const el = elRef.current;
     if (!el) return;
-    stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (stuck.current && !atBottom) {
+      // Leaving the bottom invalidates pending pin timers so delayed
+      // setTimeout/rAF pins cannot fight upward scroll / history prepend.
+      pinGen.current += 1;
+    }
+    stuck.current = atBottom;
     // Near the top of a long transcript — ask the host to page in older events.
     if (el.scrollTop < 120) onNearTopRef.current?.();
   }, []);

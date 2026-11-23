@@ -10,6 +10,7 @@ import type { Event, UsageInfo } from "../types.js";
 import type { ToolDef } from "./types.js";
 import { isTransientError } from "../agent/transientError.js";
 import { BackgroundSubagentRegistry } from "./subagentJobs.js";
+import { spillHeadTail } from "./_shared.js";
 
 /** Named sub-agent types. "explore" and "plan" are read-only; "worker" may
  * edit files. "plan" additionally structures its output as a plan. */
@@ -20,19 +21,31 @@ export type AgentType = (typeof AGENT_TYPES)[number];
 const agentTypeField = z
   .string()
   .optional()
-  .describe("explore (default, read+web) | plan | worker (bash/writes) | custom. Shell/mutate → worker.");
+  .describe(
+    "explore (default: read_file/grep/glob/ls/web_*, no bash) | plan (same, read-only) | " +
+      "worker (bash+writes) | custom. Need shell/mutate → worker.",
+  );
 
 const toolsNarrowField = z
   .array(z.string())
   .optional()
-  .describe("Narrow the agent_type pool only (cannot widen / cannot grant parent-only tools).");
+  .describe(
+    "Narrow the agent_type pool only. Out-of-pool names are ignored (not an error); " +
+      "explore/plan never gain bash via this list.",
+  );
 
 const taskSpec = z.object({
   objective: z.string().describe("Self-contained objective."),
   agent_type: agentTypeField,
   tools: toolsNarrowField,
   model: z.string().optional().describe("Model override."),
-  maxSteps: z.number().int().positive().max(1000).optional().describe("Turn cap; omit = unlimited."),
+  maxSteps: z
+    .number()
+    .int()
+    .positive()
+    .max(1000)
+    .optional()
+    .describe("Turn cap (default 40 when omitted)."),
   output_schema: z
     .record(z.string(), z.unknown())
     .optional()
@@ -53,12 +66,29 @@ const teamMemberSpec = z.object({
 
 const schema = z
   .object({
+    action: z
+      .enum(["list", "wait", "interrupt"])
+      .optional()
+      .describe(
+        "Background-subagent control (no spawn): list | wait | interrupt. " +
+          "Requires `session_id` for wait/interrupt. Omit to dispatch a sub-agent.",
+      ),
+    session_id: z
+      .string()
+      .optional()
+      .describe("Background sub-agent id for action=wait|interrupt."),
     objective: z.string().optional().describe("Single-task or team goal."),
     tasks: z.array(taskSpec).optional().describe("Parallel independent objectives (fan-out)."),
     agent_type: agentTypeField,
     tools: toolsNarrowField,
     model: z.string().optional().describe("Model override (single-task)."),
-    maxSteps: z.number().int().positive().max(1000).optional().describe("Turn cap; omit = unlimited."),
+    maxSteps: z
+      .number()
+      .int()
+      .positive()
+      .max(1000)
+      .optional()
+      .describe("Turn cap (default 40 when omitted)."),
     output_schema: z
       .record(z.string(), z.unknown())
       .optional()
@@ -67,7 +97,7 @@ const schema = z
     run: z
       .enum(["await", "background"])
       .optional()
-      .describe("await (default) | background (subagent_list/wait/interrupt)."),
+      .describe("await (default) | background (then list/wait/interrupt via action)."),
     context: z
       .enum(["fresh", "fork"])
       .optional()
@@ -88,26 +118,35 @@ const schema = z
     shared_worktree: z.boolean().optional().describe("One shared worktree for the whole team."),
     team_board: z.boolean().optional().describe("Seed task_board from leader assignments."),
   })
-  .refine(
-    (v) => {
-      const modes = [
-        // `objective` doubles as the team goal, so it is not its own mode
-        // when `team` is present.
-        Boolean(v.objective) && !(v.team && v.team.length > 0),
-        Boolean(v.tasks && v.tasks.length > 0),
-        Boolean(v.csv),
-        Boolean(v.team && v.team.length > 0),
-      ];
-      return modes.filter(Boolean).length === 1;
-    },
-    {
-      message:
-        "provide exactly one of `objective` (single task), `tasks` (fan-out), `csv` (batch), or `team` (team mode, with `objective` as the shared goal)",
-    },
-  )
+  .superRefine((v, ctx) => {
+    if (v.action === "wait" || v.action === "interrupt") {
+      if (!v.session_id) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `action=${v.action} requires session_id`,
+          path: ["session_id"],
+        });
+      }
+      return;
+    }
+    if (v.action === "list") return;
+    const modes = [
+      Boolean(v.objective) && !(v.team && v.team.length > 0),
+      Boolean(v.tasks && v.tasks.length > 0),
+      Boolean(v.csv),
+      Boolean(v.team && v.team.length > 0),
+    ];
+    if (modes.filter(Boolean).length !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "provide exactly one of `objective` (single task), `tasks` (fan-out), `csv` (batch), or `team` " +
+          "(team mode, with `objective` as the shared goal) — or use action=list|wait|interrupt",
+      });
+    }
+  })
   .refine((v) => !(v.context === "fork" && v.continue_session_id), {
-    message:
-      '`context: "fork"` and `continue_session_id` are mutually exclusive.',
+    message: '`context: "fork"` and `continue_session_id` are mutually exclusive.',
   });
 
 export interface SubagentRunSpec {
@@ -358,6 +397,7 @@ export const taskTool: ToolDef<typeof schema> & {
     "**Briefing:** write the objective as if they have zero chat context — paths/lines, what you already ruled out, and the acceptance bar. " +
     "Never \"based on your findings, fix…\" (you synthesise; they search or execute). " +
     "Modes: `objective` (one), `tasks` (parallel), `csv`+`csv_template`, or `objective`+`team`. " +
+    "Background control: `action: list|wait|interrupt` (+ `session_id` for wait/interrupt). " +
     "agent_type: explore | plan | worker — `tools` narrows only (cannot grant parent-only tools). " +
     "Knobs: isolation=worktree (git only), context=fresh|fork (`fork_max_tokens`), " +
     "omit_memory: true, run=background, continue_session_id. Pool: `subagentMaxThreads` (default 6).",
@@ -366,6 +406,24 @@ export const taskTool: ToolDef<typeof schema> & {
  // through the parent's permission engine and prompts (see subagent.ts).
   permission: "read",
   async execute(input, ctx) {
+    if (input.action === "list" || input.action === "wait" || input.action === "interrupt") {
+      const {
+        executeSubagentList,
+        executeSubagentWait,
+        executeSubagentInterrupt,
+      } = await import("./subagentControl.js");
+      const reg = this.backgroundRegistry;
+      if (!reg) {
+        return {
+          content: "background sub-agent registry is not available in this session",
+          isError: true,
+        };
+      }
+      if (input.action === "list") return executeSubagentList(reg);
+      if (input.action === "wait") return executeSubagentWait(reg, input.session_id!);
+      return executeSubagentInterrupt(reg, input.session_id!);
+    }
+
     if (!this.runner) {
       return { content: "subagent runner not configured for this session", isError: true };
     }
@@ -509,8 +567,9 @@ export const taskTool: ToolDef<typeof schema> & {
           `Background sub-agent started.\n\n` +
           `session_id: ${ownerId}\nstatus: running\n\n` +
           `It runs independently; you will get a one-time completion summary when ` +
-          `it finishes. Use subagent_list to check on it, subagent_wait to block ` +
-          `until it is done, or subagent_interrupt to stop it.`,
+          `it finishes. Use task({ action: "list" }) to check, ` +
+          `task({ action: "wait", session_id }) to block, or ` +
+          `task({ action: "interrupt", session_id }) to stop it.`,
       };
     }
 
@@ -743,14 +802,15 @@ export const taskTool: ToolDef<typeof schema> & {
         ? ` session_id: ${r.sessionId} (pass as continue_session_id to continue this sub-agent)`
         : "";
       const budgetNote = r.reachedTurnBudget ? " [turn budget reached]" : "";
-      return r.ok
-        ? {
-            content: `sub-agent completed in ${r.steps} step(s).${budgetNote}${handle}\n\nConclusion:\n\n${r.text}`,
-          }
-        : {
-            content: `sub-agent failed${budgetNote}: ${r.text}${handle}`,
-            isError: true,
-          };
+      const raw = r.ok
+        ? `sub-agent completed in ${r.steps} step(s).${budgetNote}${handle}\n\nConclusion:\n\n${r.text}`
+        : `sub-agent failed${budgetNote}: ${r.text}${handle}`;
+      const spilled = await spillHeadTail(ctx, raw, `task:${r.sessionId ?? r.i}`);
+      return {
+        content: spilled.content,
+        isError: !r.ok,
+        artifactRef: spilled.artifactRef,
+      };
     }
     const body = results
       .map(
@@ -758,9 +818,12 @@ export const taskTool: ToolDef<typeof schema> & {
           `### Task ${r.i + 1} ${r.ok ? `(${r.steps} steps)` : "(FAILED)"}\n\n${r.text}`
       )
       .join("\n\n---\n\n");
+    const raw = `${results.length} sub-agents finished (${results.filter((r) => r.ok).length} ok).\n\n${body}`;
+    const spilled = await spillHeadTail(ctx, raw, `task:fanout:${results.length}`);
     return {
-      content: `${results.length} sub-agents finished (${results.filter((r) => r.ok).length} ok).\n\n${body}`,
+      content: spilled.content,
       isError: results.some((r) => !r.ok),
+      artifactRef: spilled.artifactRef,
     };
   },
 };

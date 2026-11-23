@@ -13,27 +13,76 @@ import {
   FORCED_SHRINK_RATIO,
 } from "./geometry.js";
 import { foldToolResults, findCutoff, type CompactionResult } from "./fold.js";
+import { applyToolResultPruneOverlays } from "./prune.js";
+import { truncateToolCallInput } from "./toolInput.js";
 import type { CompactionOptions } from "./geometry.js";
 
-const SUMMARY_TOOL_RESULT_CHARS = 1500;
+/** Error tool_results keep a short diagnostic head for Errors;
+ * successful bodies are omitted. */
+const SUMMARY_ERROR_RESULT_CHARS = 400;
 
-/** Summariser input: only what the model saw, labelled by role, with very
- * large tool output trimmed (it is in an artifact anyway). Stream deltas,
- * usage and status chatter are noise the summary must not echo. */
-function serializeForSummary(e: Event): string {
+type ToolCallMeta = { name: string; target?: string };
+
+/** Pull a path/pattern/query from tool_use input for summary stubs. */
+function toolCallTarget(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const o = input as Record<string, unknown>;
+  for (const key of ["path", "file_path", "filePath", "glob", "pattern", "query", "url", "command"]) {
+    const v = o[key];
+    if (typeof v === "string" && v.trim()) {
+      // Commands can be long — keep a short head for the stub only.
+      return key === "command" && v.length > 120 ? `${v.slice(0, 120)}…` : v;
+    }
+  }
+  return undefined;
+}
+
+function collectToolCallMeta(events: Event[]): Map<string, ToolCallMeta> {
+  const meta = new Map<string, ToolCallMeta>();
+  for (const e of events) {
+    if (e.type !== "message") continue;
+    for (const b of e.content) {
+      if (b.type !== "tool_use") continue;
+      meta.set(b.id, { name: b.name, target: toolCallTarget(b.input) });
+    }
+  }
+  return meta;
+}
+
+/** Summariser input for one event. Tool bodies are stubbed (paths/meta only)
+ * so the checkpoint does not paste read_file/code dumps. */
+export function serializeForSummary(
+  e: Event,
+  callMeta: Map<string, ToolCallMeta> = new Map(),
+): string {
   switch (e.type) {
     case "message": {
       const text = e.content
-        .map((b) => (b.type === "text" ? b.text : b.type === "tool_use" ? `[call ${b.name} ${JSON.stringify(b.input)}]` : ""))
+        .map((b) =>
+          b.type === "text"
+            ? b.text
+            : b.type === "tool_use"
+              ? `[call ${b.name} ${JSON.stringify(truncateToolCallInput(b.input))}]`
+              : "",
+        )
         .filter((s) => s !== "")
         .join("\n");
       return text ? `${e.role.toUpperCase()}: ${text}` : "";
     }
     case "tool_result": {
-      const body = e.content.length > SUMMARY_TOOL_RESULT_CHARS
-        ? `${e.content.slice(0, SUMMARY_TOOL_RESULT_CHARS)}\n… [${e.content.length - SUMMARY_TOOL_RESULT_CHARS} chars trimmed]`
-        : e.content;
-      return `RESULT ${e.name}${e.isError ? " (error)" : ""}: ${body}`;
+      const meta = callMeta.get(e.toolCallId);
+      const target = meta?.target;
+      const targetBit = target ? ` target=${JSON.stringify(target)}` : "";
+      const refBit = e.artifactRef ? ` artifact=${e.artifactRef}` : "";
+      if (e.isError) {
+        const head =
+          e.content.length > SUMMARY_ERROR_RESULT_CHARS
+            ? `${e.content.slice(0, SUMMARY_ERROR_RESULT_CHARS)}…`
+            : e.content;
+        return `RESULT ${e.name} (error)${targetBit}${refBit}: ${head.replace(/\s+/g, " ").trim()}`;
+      }
+      // Success: omit body entirely — next agent re-reads paths as needed.
+      return `RESULT ${e.name}${targetBit}${refBit} (${e.content.length} chars) [body omitted — re-read if needed]`;
     }
     case "plan":
       return `PLAN: ${e.steps.map((s) => `[${s.status}] ${s.id} ${s.title}`).join("; ")}`;
@@ -45,44 +94,73 @@ function serializeForSummary(e: Event): string {
       return "";
   }
 }
+
+/** Full transcript text fed to the summariser model. */
+export function serializeEventsForSummary(events: Event[]): string {
+  const callMeta = collectToolCallMeta(events);
+  return events
+    .map((e) => serializeForSummary(e, callMeta))
+    .filter((s) => s !== "")
+    .join("\n---\n");
+}
 /**
- * The structured prompt the small model receives to summarise dropped history.
- * Exported so tests can assert the contract.
+ * Handoff checkpoint prompt. Fixed section order (goals → concepts → files →
+ * errors → done → pending → current → next → critical) so a resuming agent can
+ * find open work without pasted code.
  */
-export const SUMMARY_SYSTEM_PROMPT = `You are a context compactor for a long-running coding session. The conversation below has been dropped from the active context window because the session is running out of tokens. Your job is to write a checkpoint that lets the next instance of the agent (which has not seen the dropped turns) resume the work with no loss of essential context — as if nothing had happened.
+export const SUMMARY_SYSTEM_PROMPT = `You are writing a handoff checkpoint so another coding agent can continue this session without the dropped turns.
 
-Output ONLY the checkpoint. No preamble, no closing line, no mention that context was compacted, no tool calls. Do not address the user and do not say "I". Use exactly these eight sections, in this order, each introduced by its heading on its own line. Keep every section — if one does not apply, write "(none)" under it; never drop a section. Prefer terse single-line bullets over prose paragraphs; keep the whole checkpoint under ~1200 tokens.
+Output ONLY the Markdown below. No preamble, no closing line, no tool calls, no mention that context was compacted. Do not address the user and do not say "I". Keep every section (use "(none)" when empty). Terse single-line bullets. Whole checkpoint under ~900 tokens.
 
-1. USER REQUESTS
-   Every request, constraint, correction and preference the user stated, in order — quote the exact wording where it matters. The work is judged against these. Leave out repository conventions and instruction files (e.g. AGENTS.md) the agent was given rather than asked for.
+## Goals
+- Every distinct user request, correction, and hard constraint for this work, in order. Quote exact wording when it matters.
+- Do not drop an earlier goal because a later message refined it — keep both if both still apply.
+- If the user said what "done" looks like, one short line for that.
 
-2. CURRENT STATE
-   What is done, what is in flight (active), and what is blocked or not started. Keep these three apart. Reference plan step ids when present. Preserve consequential workflow state: whether changes are uncommitted, committed, pushed, under review, or merged.
+## Concepts
+- Technologies, frameworks, patterns, and conventions in play — or "(none)".
+- One-line each; no code dumps.
 
-3. KEY FILES AND SYMBOLS
-   The files and symbols the next agent will need, most important first (at most ~15). Format: \`path/to/file.ts:42 — why it matters\`. Prefer a short reference over restating code the next agent can re-read.
+## Key files
+- \`path/to/file.ts:42 — why it matters\` (at most ~15). Include examined, edited, or created paths.
+- Paths + why only — NEVER paste file contents, diffs, or tool output.
 
-4. DECISIONS MADE
-   Choices the previous agent took, each with a one-sentence rationale. Anything that, if forgotten, would cause the next agent to re-debate it.
+## Errors
+- Each error or failure hit, how it was fixed (or that it is still open), plus related user feedback — or "(none)".
+- Prefer verbatim error strings / commands when diagnostic.
 
-5. ERRORS AND FIXES
-   Bugs hit, their root cause, and how they were resolved. Include the verbatim command or error message when it is diagnostic (e.g. a specific stack-trace frame). Skip transient network blips.
+## Done
+- Finished work and verified outcomes — or "(none)".
+- When a plan exists, list every \`[completed]\` step as \`[completed] id — title\`.
+- Include consequential git state when relevant (uncommitted / committed / pushed).
 
-6. OPEN THREADS
-   Things left unfinished, known unknowns, and any question still waiting on the user — carry a question forward only while it is unanswered, preserving its exact wording, and drop it once newer history resolved it.
+## Pending
+- Explicitly requested work not yet started — or "(none)".
+- When a plan exists, list every \`[pending]\` step as \`[pending] id — title\`. Also list unfinished user asks that are not started.
 
-7. NEXT MOVE
-   The ordered next steps the next agent should take, most useful first. Anchor each to a file:line or plan step id where possible.
+## Current
+- Precisely what is in flight at this checkpoint — or "(none)".
+- When a plan exists, list every \`[in_progress]\` step as \`[in_progress] id — title\`, plus partial edits and open questions waiting on the user (exact wording).
+- Do not put completed work here — that belongs in Done.
 
-8. IMPORTANT CONTEXT
-   Non-obvious facts, traps, and gotchas that are easy to misread from the transcript alone (e.g. "event X is not persisted, so grepping for it finds nothing — not evidence of absence").
+## Up next
+1. The single next action that continues the user's most recent explicit ask (prefer the next incomplete plan step id, or file:line) — or "(none)".
+2. Optional follow-up if already clear — or "(none)".
+
+## Critical
+- Decisions and one-line why (what was picked over what).
+- Constraints, preferences, open questions, traps/gotchas, and identifiers needed to continue.
+- One-line facts only (e.g. \`FooService\` exports \`bar\`). Or "(none)" if empty.
 
 Rules:
-- Preserve verbatim: exact file paths, command lines, error messages, identifiers, numeric values, function signatures, syntax fragments, URLs, env var values, branch names, commit hashes, and any literal string the user gave (connection strings, ports, seeds, tokens). Never paraphrase these. When in doubt whether something is verbatim-form, treat it as verbatim and quote it.
-- Drop: conversational filler, duplicate tool outputs, intermediate reasoning that did not lead to a decision.
-- **Source separation — do not conflate tasks.** This session may contain several distinct tasks or materials. Keep them separate. Do NOT merge an entity, file, topic, or conclusion from an EARLIER task into the CURRENT one. If you write that a document/material "contains" or "concluded" X, that X must have actually appeared in that material in the dropped turns — never carry a topic over from a different task just because it was discussed in this session.
-- **Distinguish verified from assumed.** A fact that came from a tool result (read_file/grep/glob output, a passing test) is VERIFIED — state it plainly. A claim the agent made without tool backing is an ASSUMPTION — mark it as such ("assumed", "unverified"). Never promote an assumption to a fact in the summary.
-- If an earlier checkpoint/summary already appears in the dropped turns, do not copy it forward verbatim: keep its still-true facts, drop stale ones, and merge in newer information.`;
+- Keep every section, even when empty; never drop a section.
+- Terse bullets, not prose paragraphs.
+- Preserve verbatim: file paths, commands, error strings, URLs, identifiers, env values, branch/commit names, and user-supplied literals. Never paraphrase those.
+- NEVER paste file contents, diffs, or tool bodies. Transcript tool results are stubbed on purpose — record path + one-line takeaway; re-read if exact text is needed. Do not invent code.
+- Distinguish verified from assumed: tool-backed facts (read/grep/test) state plainly; unaided agent claims mark as "assumed"/"unverified".
+- Source separation: do not merge topics from an earlier distinct task into the current one.
+- If an earlier checkpoint appears in the history: keep still-true facts, drop stale ones, merge newer progress; move finished Current items into Done; where they conflict, the newer conversation wins.
+- Up next must stay aligned with the latest user request — do not invent a new task.`;
 
 const ARCHIVE_TOOL_RESULT_CHARS = 20_000;
 
@@ -107,7 +185,9 @@ export function renderTranscriptArchive(events: Event[]): string {
         break;
       }
       case "tool_call":
-        blocks.push(`### TOOL CALL ${e.name}${stamp(e)}\n\n${JSON.stringify(e.input ?? {})}`);
+        blocks.push(
+          `### TOOL CALL ${e.name}${stamp(e)}\n\n${JSON.stringify(truncateToolCallInput(e.input ?? {}))}`,
+        );
         break;
       case "tool_result": {
         const ref = e.artifactRef ? ` (artifact ${e.artifactRef})` : "";
@@ -143,12 +223,19 @@ export function liveTranscript(persisted: Event[]): Event[] {
     const e = persisted[i]!;
     if (e.type === "compaction" && e.kind !== "micro-fold" && !hidden.has(i)) last = i;
   }
-  if (last < 0) return hidden.size === 0 ? persisted.slice() : persisted.filter(visible);
-  const c = persisted[last] as Extract<Event, { type: "compaction" }>;
-  const keepFrom = typeof c.keepFrom === "number" ? Math.min(Math.max(0, c.keepFrom), last) : last;
-  const keep = (from: number, to: number) =>
-    persisted.slice(from, to).filter((e, j) => !hidden.has(from + j));
-  return [c, ...keep(keepFrom, last), ...keep(last + 1, persisted.length)];
+  let live: Event[];
+  if (last < 0) {
+    live = hidden.size === 0 ? persisted.slice() : persisted.filter(visible);
+  } else {
+    const c = persisted[last] as Extract<Event, { type: "compaction" }>;
+    const keepFrom = typeof c.keepFrom === "number" ? Math.min(Math.max(0, c.keepFrom), last) : last;
+    const keep = (from: number, to: number) =>
+      persisted.slice(from, to).filter((e, j) => !hidden.has(from + j));
+    live = [c, ...keep(keepFrom, last), ...keep(last + 1, persisted.length)];
+  }
+  // Apply durable micro-fold stubs so resume and estimates see the same
+  // pruned bodies the next provider request will send.
+  return applyToolResultPruneOverlays(live);
 }
 
 /** Indices hidden by `rewind` events: each hides the span from the message it
@@ -316,14 +403,13 @@ function buildTrimStub(
   if (!prior?.trim()) return handoff;
   const priorHead = capText(prior.trim(), Math.min(PRIOR_HANDOFF_HEAD, Math.floor(maxChars / 3)));
   // Prefer the newer handoff body; keep prior only as a short prefix so
-  // earlier USER REQUESTS / decisions are not lost entirely.
+  // earlier Goals / Critical are not lost entirely.
   return capText(`${priorHead}\n\n---\nLater trim:\n${handoff}`, maxChars);
 }
 
 /**
  * Deterministic handoff when turns are dropped without an LLM summariser.
- * Mirrors the SUMMARY_SYSTEM_PROMPT sections so the agent can resume the
- * task instead of re-asking "what were we doing?".
+ * Same section shape as SUMMARY_SYSTEM_PROMPT so resume UX stays consistent.
  */
 export function buildLocalHandoffSummary(
   dropped: Event[],
@@ -344,7 +430,9 @@ export function buildLocalHandoffSummary(
       if (
         text &&
         !text.startsWith("[Earlier conversation summary]") &&
-        !text.startsWith("HANDOFF")
+        !text.startsWith("HANDOFF") &&
+        !text.startsWith("## Goals") &&
+        !text.startsWith("## Concepts")
       ) {
         userAsks.push(text.length > askCap ? `${text.slice(0, askCap)}…` : text);
       }
@@ -354,7 +442,6 @@ export function buildLocalHandoffSummary(
         .map((b) => (b.type === "text" ? b.text : ""))
         .join("\n")
         .trim();
-      // Capture short commitment lines ("I'll…", "Next…") as decisions.
       if (text && text.length < 400 && /(?:^|\n)(?:I(?:'ll| will)|Next|Going to|Plan:)/i.test(text)) {
         decisions.push(text.length > 240 ? `${text.slice(0, 240)}…` : text);
       }
@@ -375,39 +462,68 @@ export function buildLocalHandoffSummary(
   }
 
   const plan = extractPlan(dropped);
-  const sections: string[] = [
-    "HANDOFF (context trimmed to fit the model window — resume the task; do not restart from scratch).",
+  // Keep several user asks — original goal + later corrections both matter.
+  const objective =
+    userAsks.length > 0
+      ? userAsks.slice(-4).map((u) => `- ${u}`).join("\n")
+      : "- (none)";
+  const details: string[] = [];
+  for (const d of decisions.slice(-8)) details.push(`- ${d}`);
+  if (details.length === 0) details.push("- (none)");
+
+  const fmtStep = (s: { status: string; id: string; title: string }) =>
+    `- [${s.status}] ${s.id} — ${s.title}`;
+  const completed =
+    plan && plan.length > 0
+      ? plan.filter((s) => s.status === "completed").map(fmtStep)
+      : [];
+  const inProgress =
+    plan && plan.length > 0
+      ? plan.filter((s) => s.status === "in_progress").map(fmtStep)
+      : [];
+  const pending =
+    plan && plan.length > 0
+      ? plan.filter((s) => s.status === "pending").map(fmtStep)
+      : [];
+  const errorLines = errors.slice(-6).map((err) => `- ${err}`);
+  const nextPlan =
+    plan?.find((s) => s.status === "in_progress") ??
+    plan?.find((s) => s.status === "pending");
+
+  const sections = [
+    "## Goals",
+    objective,
+    "",
+    "## Concepts",
+    "- (none)",
+    "",
+    "## Key files",
+    ...(files.size > 0
+      ? [...files].slice(-15).map((p) => `- \`${p}\` — touched in dropped turns`)
+      : ["- (none)"]),
+    "",
+    "## Errors",
+    ...(errorLines.length > 0 ? errorLines : ["- (none)"]),
+    "",
+    "## Done",
+    ...(completed.length > 0 ? completed : ["- (none)"]),
+    "",
+    "## Pending",
+    ...(pending.length > 0 ? pending : ["- (none)"]),
+    "",
+    "## Current",
+    ...(inProgress.length > 0 ? inProgress : ["- (none)"]),
+    "",
+    "## Up next",
+    nextPlan
+      ? `1. Continue plan step \`${nextPlan.id}\` — ${nextPlan.title}.`
+      : "1. Continue from the recent turns below; re-read files if exact text is needed.",
+    "2. (none)",
+    "",
+    "## Critical",
+    ...(details[0] === "- (none)" ? ["- (none)"] : details),
   ];
-  if (userAsks.length > 0) {
-    const kept = userAsks.slice(-4);
-    sections.push(
-      `USER REQUESTS\n${kept.map((u, i) => `${i + 1}. ${u}`).join("\n")}`,
-    );
-  }
-  if (plan && plan.length > 0) {
-    sections.push(
-      `CURRENT STATE (plan)\n${plan.map((s) => `- [${s.status}] ${s.id}: ${s.title}`).join("\n")}`,
-    );
-  }
-  if (files.size > 0) {
-    sections.push(
-      `KEY FILES\n${[...files].slice(-24).map((p) => `- ${p}`).join("\n")}`,
-    );
-  }
-  if (decisions.length > 0) {
-    sections.push(
-      `DECISIONS / ACTIONS\n${decisions.slice(-8).map((d) => `- ${d}`).join("\n")}`,
-    );
-  }
-  if (errors.length > 0) {
-    sections.push(
-      `ERRORS AND FIXES\n${errors.slice(-6).map((err) => `- ${err}`).join("\n")}`,
-    );
-  }
-  sections.push(
-    "NEXT MOVE\nContinue from the recent turns below. Re-read files via tools (or read_artifact for folded results) if you need exact earlier text — do not invent requirements that are not in USER REQUESTS / plan.",
-  );
-  return capText(sections.join("\n\n"), maxChars);
+  return capText(sections.join("\n"), maxChars);
 }
 
 /**
@@ -488,7 +604,7 @@ function truncateOversizedPayloads(
       };
       changed = true;
     } else if (e.type === "compaction" && e.summary.length > 200) {
-      // Keep the head (USER REQUESTS / plan / files) — drop the tail first.
+      // Keep the head (Goals / Pending / Current / files) — drop the tail first.
       working[bestIdx] = {
         ...e,
         summary:
@@ -506,7 +622,7 @@ function truncateOversizedPayloads(
                 ...b,
                 text:
                   b.text.slice(0, keepChars) +
-                  `\n… [earlier user message truncated — see HANDOFF USER REQUESTS]`,
+                  `\n… [earlier user message truncated — see HANDOFF Goals]`,
               }
             : b,
         ),
@@ -670,10 +786,7 @@ async function callSummariser(
   model: string | undefined,
   extraInstructions?: string,
 ): Promise<string> {
-  const userContent = events
-    .map(serializeForSummary)
-    .filter((s) => s !== "")
-    .join("\n---\n");
+  const userContent = serializeEventsForSummary(events);
   const collected: string[] = [];
   const systemPrompt = composeSummaryPrompt(extraInstructions);
   const stream = provider.stream({

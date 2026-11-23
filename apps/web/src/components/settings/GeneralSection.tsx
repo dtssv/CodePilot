@@ -1,21 +1,32 @@
 import type { AgentMode, PermissionMode } from "@codepilot/core";
 import type React from "react";
 import type { SearchEngineInfo } from "../../protocol/client.js";
-import { getLocale, setLocale, t, type Locale } from "../../i18n.js";
+import { getLocale, t, type Locale } from "../../i18n.js";
 import { saveDefaultAgentMode, savePermissionMode } from "../../prefs.js";
-import { THEME_NAMES, type Layout, type Theme, type ThemeName } from "../../surface.js";
+import {
+  THEME_NAMES,
+  type Layout,
+  type ThemeName,
+  type ThemePreference,
+} from "../../surface.js";
 import type { Codepilot } from "../../state/useCodepilot.js";
 import { GeneralRow } from "./GeneralRow.js";
 import { listTemplateEnvVars, parseHeaderLines } from "./helpers.js";
 import { THEME_NAME_LABELS } from "./types.js";
 
+export type PanelPosition = "left" | "right" | "top" | "bottom";
+
 export type GeneralSectionProps = {
   cp: Codepilot;
   state: Codepilot["state"];
-  theme: Theme;
-  onTheme: (theme: Theme) => void;
+  themePreference: ThemePreference;
+  onTheme: (theme: ThemePreference) => void;
   themeName: ThemeName;
   onThemeName: (name: ThemeName) => void;
+  onLocale: (locale: Locale) => void;
+  /** VS Code / Cursor only — chat dock side. */
+  panelPosition?: PanelPosition;
+  onPanelPosition?: (position: PanelPosition) => void;
   layout: Layout;
   onLayout: (layout: Layout) => void;
   permissionMode: PermissionMode;
@@ -61,10 +72,13 @@ export type GeneralSectionProps = {
 export function GeneralSection({
   cp,
   state,
-  theme,
+  themePreference,
   onTheme,
   themeName,
   onThemeName,
+  onLocale,
+  panelPosition,
+  onPanelPosition,
   layout,
   onLayout,
   permissionMode,
@@ -92,29 +106,45 @@ export function GeneralSection({
   return (
         <div className="space-y-3">
           <div className="divide-y divide-[var(--color-edge-subtle)] overflow-hidden rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)]">
-            <GeneralRow title={t("Language")} hint={t("Interface language")}>
+            <GeneralRow title={t("Language")}>
               <select
                 className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
                 value={getLocale()}
                 aria-label={t("Language")}
-                onChange={(e) => setLocale(e.target.value as Locale, { persist: true })}
+                onChange={(e) => onLocale(e.target.value as Locale)}
               >
                 <option value="zh">{t("Chinese")}</option>
                 <option value="en">{t("English")}</option>
               </select>
             </GeneralRow>
-            <GeneralRow title={t("Theme")} hint={t("Color scheme")}>
+            <GeneralRow title={t("Theme")}>
               <select
                 className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
-                value={theme}
+                value={themePreference}
                 aria-label={t("Theme")}
-                onChange={(e) => onTheme(e.target.value as Theme)}
+                onChange={(e) => onTheme(e.target.value as ThemePreference)}
               >
+                <option value="system">{t("System")}</option>
                 <option value="light">{t("Light")}</option>
                 <option value="dark">{t("Dark")}</option>
               </select>
             </GeneralRow>
-            <GeneralRow title={t("Palette")} hint={t("Named colour scheme")}>
+            {layout === "embedded" && onPanelPosition && (
+              <GeneralRow title={t("Panel position")}>
+                <select
+                  className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
+                  value={panelPosition ?? "left"}
+                  aria-label={t("Panel position")}
+                  onChange={(e) => onPanelPosition(e.target.value as PanelPosition)}
+                >
+                  <option value="left">{t("Left")}</option>
+                  <option value="right">{t("Right")}</option>
+                  <option value="top">{t("Top")}</option>
+                  <option value="bottom">{t("Bottom")}</option>
+                </select>
+              </GeneralRow>
+            )}
+            <GeneralRow title={t("Palette")}>
               <select
                 className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
                 value={themeName}
@@ -129,7 +159,7 @@ export function GeneralSection({
               </select>
             </GeneralRow>
             {layout !== "embedded" && (
-              <GeneralRow title={t("Layout")} hint={t("Primary UI layout")}>
+              <GeneralRow title={t("Layout")}>
                 <select
                   className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
                   value={layout}
@@ -141,7 +171,7 @@ export function GeneralSection({
                 </select>
               </GeneralRow>
             )}
-            <GeneralRow title={t("Permission mode")} hint={t("How tools ask for approval")}>
+            <GeneralRow title={t("Permission mode")}>
               <select
                 className="cp-input w-auto min-w-[9.5rem] shrink-0 py-1.5 text-[12.5px]"
                 value={permissionMode}
@@ -160,7 +190,7 @@ export function GeneralSection({
                 <option value="yolo">{t("Full access (YOLO)")}</option>
               </select>
             </GeneralRow>
-            <GeneralRow title={t("Default mode")} hint={t("Collaboration mode for new sessions")}>
+            <GeneralRow title={t("Default mode")}>
               <select
                 className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
                 value={state.agentMode}
@@ -177,10 +207,7 @@ export function GeneralSection({
               </select>
             </GeneralRow>
             {lanAccess !== null && (
-              <GeneralRow
-                title={t("Allow phone access (same Wi‑Fi)")}
-                hint={t("Lets a phone on your network reach the engine via the QR code. Access still requires the one-time pairing. Toggling restarts the engine.")}
-              >
+              <GeneralRow title={t("Allow phone access (same Wi‑Fi)")}>
                 <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[12.5px] text-[var(--color-ink-dim)]">
                   <input
                     type="checkbox"
@@ -193,10 +220,7 @@ export function GeneralSection({
               </GeneralRow>
             )}
             {sandboxMode !== null && (
-              <GeneralRow
-                title={t("Tool sandbox")}
-                hint={t("OS-level confinement for bash commands and file writes. “workspace-write” confines writes to the workspace; “read-only” blocks writes; “off” runs tools WITHOUT OS confinement (trusted machines only). Applies to the current session immediately.")}
-              >
+              <GeneralRow title={t("Tool sandbox")}>
                 <select
                   className="cp-input w-auto min-w-[8rem] shrink-0 py-1.5 text-[12.5px]"
                   value={sandboxMode}
@@ -233,12 +257,7 @@ export function GeneralSection({
 
           <div className="overflow-hidden rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] p-3">
             <div className="flex items-center justify-between">
-              <div>
-                <div className="text-[13px] font-medium text-[var(--color-ink)]">{t("Image generation")}</div>
-                <div className="mt-0.5 text-[11.5px] leading-4 text-[var(--color-ink-faint)]">
-                  {t("Configure an image model endpoint. The image tool is only available when this is set.")}
-                </div>
-              </div>
+              <div className="text-[13px] font-medium text-[var(--color-ink)]">{t("Image generation")}</div>
               <label className="flex shrink-0 items-center gap-1.5 text-[12px] text-[var(--color-ink-dim)]">
                 <input
                   type="checkbox"
@@ -289,14 +308,7 @@ export function GeneralSection({
           </div>
 
           <div className="overflow-hidden rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-raised)] p-3">
-            <div>
-              <div className="text-[13px] font-medium text-[var(--color-ink)]">{t("Web search")}</div>
-              <div className="mt-0.5 text-[11.5px] leading-4 text-[var(--color-ink-faint)]">
-                {t(
-                  "Pick a catalog engine (template + key), or Custom to point at any JSON search API via URL / headers / body / resultsPath.",
-                )}
-              </div>
-            </div>
+            <div className="text-[13px] font-medium text-[var(--color-ink)]">{t("Web search")}</div>
             <div className="mt-2 space-y-2">
               <label className="block">
                 <span className="cp-eyebrow">{t("Search engine")}</span>

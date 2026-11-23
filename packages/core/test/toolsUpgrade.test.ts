@@ -6,8 +6,10 @@ import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { readFileTool } from "../src/tools/read_file.js";
+import { readArtifactTool } from "../src/tools/read_artifact.js";
 import { editFileTool } from "../src/tools/edit_file.js";
 import { writeFileTool } from "../src/tools/write_file.js";
+import { sniffImageMediaType } from "../src/tools/read_image.js";
 import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import type { ToolContext } from "../src/tools/types.js";
 
@@ -35,16 +37,24 @@ describe("read_file", () => {
     await writeFile(join(dir, "a.txt"), "hello\nworld\n");
     const r = await readFileTool.execute({ path: "a.txt" }, ctx());
     expect(r.content).toContain("(2 lines");
-    expect(r.content).toContain("     1\thello");
-    expect(r.content).toContain("     2\tworld");
+    expect(r.content).toContain("1\thello");
+    expect(r.content).toContain("2\tworld");
   });
 
   it("windows into files with startLine/maxLines", async () => {
     await writeFile(join(dir, "b.txt"), "l1\nl2\nl3\nl4\n");
     const r = await readFileTool.execute({ path: "b.txt", startLine: 1, maxLines: 2 }, ctx());
     expect(r.content).toContain("showing lines 2-3");
-    expect(r.content).toContain("     2\tl2");
+    expect(r.content).toContain("2\tl2");
     expect(r.content).not.toContain("l1\t");
+  });
+
+  it("negative startLine reads a tail window", async () => {
+    await writeFile(join(dir, "tail.txt"), "l1\nl2\nl3\nl4\nl5\n");
+    const r = await readFileTool.execute({ path: "tail.txt", startLine: -2, maxLines: 10 }, ctx());
+    expect(r.content).toContain("4\tl4");
+    expect(r.content).toContain("5\tl5");
+    expect(r.content).not.toContain("1\tl1");
   });
 
   it("detects binary files and refuses to dump them", async () => {
@@ -110,6 +120,52 @@ describe("read_file", () => {
     );
     expect(r.isError).toBe(true);
     expect(r.content).toMatch(/sensitive path/);
+  });
+});
+
+describe("read_artifact byte budget", () => {
+  it("caps oversized artifact output under the inline byte budget", async () => {
+    // Many short lines so per-line clamp does not hide the byte budget.
+    const lines = Array.from({ length: 4000 }, (_, i) => `row-${i} ${"pad".repeat(20)}`);
+    const artifacts = new Map<string, string>([["art_big", lines.join("\n")]]);
+    const r = await readArtifactTool.execute(
+      { ref: "art_big" },
+      {
+        cwd: dir,
+        artifact: async () => "art_x",
+        readArtifact: async (ref) => artifacts.get(ref) ?? "",
+      },
+    );
+    expect(r.isError).toBeFalsy();
+    expect(Buffer.byteLength(r.content, "utf-8")).toBeLessThan(60 * 1024);
+    expect(r.content).toMatch(/truncated at .* bytes/);
+  });
+
+  it("clamps a single pathological line", async () => {
+    const huge = "中".repeat(40_000);
+    const artifacts = new Map<string, string>([["art_line", huge]]);
+    const r = await readArtifactTool.execute(
+      { ref: "art_line" },
+      {
+        cwd: dir,
+        artifact: async () => "art_x",
+        readArtifact: async (ref) => artifacts.get(ref) ?? "",
+      },
+    );
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toMatch(/chars truncated/);
+    expect(r.content.length).toBeLessThan(5000);
+  });
+});
+
+describe("sniffImageMediaType", () => {
+  it("detects PNG magic bytes", () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0]);
+    expect(sniffImageMediaType(png)).toBe("image/png");
+  });
+
+  it("returns null for non-images", () => {
+    expect(sniffImageMediaType(Buffer.from("hello"))).toBeNull();
   });
 });
 

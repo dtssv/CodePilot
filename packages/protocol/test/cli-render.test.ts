@@ -37,10 +37,10 @@ describe("PrettyRenderer", () => {
     expect(text()).toBe("\n◆ Hello");
   });
 
-  it("renders retries and hides plan_update", () => {
+  it("renders retries and hides plan tool calls", () => {
     const { r, text } = capture();
-    r.render({ type: "tool_call", id: "p", name: "plan_update", input: {} });
-    r.render({ type: "tool_result", toolCallId: "p", name: "plan_update", content: "ok" });
+    r.render({ type: "tool_call", id: "p", name: "plan", input: { action: "update" } });
+    r.render({ type: "tool_result", toolCallId: "p", name: "plan", content: "ok" });
     r.render({ type: "retry", attempt: 1, maxAttempts: 3, delayMs: 1500, reason: "ECONNRESET" });
     expect(text()).toBe("↻ Retrying (1/3) in 1.5s · ECONNRESET\n");
   });

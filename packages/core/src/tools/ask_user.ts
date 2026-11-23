@@ -1,12 +1,8 @@
 // ask_user_question: structured Q&A the host renders and answers; headless
 // sessions error out so the model falls back to a reasonable default.
-// plan_done: plan-mode exit ramp — host approves, then a `mode_request` event
-// switches the session to agent mode; the plan is also written to
-// `~/.codepilot/projects/<hash>/plans/<slug>.md` as a reviewable artifact.
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
-import type { PlanStep } from "../types.js";
 
 const questionSchema = z.object({
   id: z.string().min(1).describe("Stable id echoed in the answers map."),
@@ -80,84 +76,6 @@ export const askUserQuestionTool: ToolDef<typeof askSchema> = {
       content: allDeclined
         ? `The user did not pick an answer:\n${lines.join("\n")}`
         : `User answers:\n${lines.join("\n")}`,
-    };
-  },
-};
-
-const planDoneSchema = z.object({
-  summary: z
-    .string()
-    .optional()
-    .describe("One-paragraph summary of the plan being submitted for approval."),
-});
-
-export const planDoneTool: ToolDef<typeof planDoneSchema> & {
- /** Optional: a function the host wires up so plan_done can persist the
- * plan to `~/.codepilot/projects/<hash>/plans/` before asking for approval. Receives the
- * summary + the current plan steps. Returns the path of the written file. */
-  writePlan?: (summary: string | undefined, steps: PlanStep[]) => Promise<string>;
- /** Optional: current plan steps, injected by the session so plan_done
- * can write them to disk without needing a separate tool call. */
-  currentPlan?: () => PlanStep[] | undefined;
-} = {
-  name: "plan_done",
-  description:
-    "Submit the plan for approval (writes under `~/.codepilot/projects/…/plans/`). On approve → agent " +
-    "mode; on reject → stay in plan mode and revise. Call only when the plan is ready.",
-  inputSchema: planDoneSchema,
-  permission: "read",
-  async execute(input, ctx) {
- // Persist the plan to disk first.
-    let planPath: string | undefined;
-    if (this.writePlan && this.currentPlan) {
-      try {
-        const steps = this.currentPlan() ?? [];
-        planPath = await this.writePlan(input.summary, steps);
-      } catch {
- /* best-effort — approval flow still works without the file */
-      }
-    }
-    if (!ctx.askUser) {
- // Headless: treat as approved so automated plan→agent flows work.
-      return {
-        content: `plan approved (headless session: auto-approved)${planPath ? ` — written to ${planPath}` : ""}`,
-        blocks: [
-          {
-            type: "text",
-            text: JSON.stringify({ type: "exit_plan_mode", approved: true, summary: input.summary ?? "", planPath }),
-          },
-        ],
-      };
-    }
-    const answers = await ctx.askUser({
-      requestId: `q_${Math.random().toString(36).slice(2, 10)}`,
-      questions: [
-        {
-          id: "approve",
-          header: "Plan approval",
-          question:
-            (input.summary ? input.summary + "\n\n" : "") +
-            `Approve this plan and switch to agent mode?${planPath ? `\n\n_Plan written to \`${planPath}\` — open it to review in full._` : ""}`,
-          options: [
-            { label: "Approve", description: "Switch to agent mode and execute the plan." },
-            { label: "Revise", description: "Stay in plan mode; give feedback to revise." },
-          ],
-        },
-      ],
-    });
-    const raw = answers["approve"];
-    const answer = Array.isArray(raw) ? raw[0] : raw;
-    const approved = answer === "Approve";
-    return {
-      content: approved
-        ? `plan approved by user — you are now in agent mode, begin executing.${planPath ? ` Plan file: ${planPath}` : ""}`
-        : `plan NOT approved. Feedback: ${answer ?? "(none)"}. Revise and resubmit.`,
-      blocks: [
-        {
-          type: "text",
-          text: JSON.stringify({ type: "exit_plan_mode", approved, summary: input.summary ?? "", planPath }),
-        },
-      ],
     };
   },
 };

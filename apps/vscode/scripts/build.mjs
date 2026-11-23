@@ -40,11 +40,13 @@ const config = {
 function copyWebview() {
   const src = resolve(root, "../web/dist-embed/index.html");
   if (!existsSync(src)) {
-    console.warn("! apps/web/dist-embed/index.html missing — run `pnpm --filter @codepilot/web build` first");
-    return;
+    throw new Error(
+      "apps/web/dist-embed/index.html missing — run `pnpm --filter @codepilot/web build` first (package:vscode does this)",
+    );
   }
   mkdirSync(resolve(root, "media/webview"), { recursive: true });
   copyFileSync(src, resolve(root, "media/webview/index.html"));
+  console.log(`copied webview embed (${src})`);
 }
 
 /** Ship a self-contained CLI so the extension works without a system install. */

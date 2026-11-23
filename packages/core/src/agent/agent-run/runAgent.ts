@@ -33,14 +33,26 @@ import {
   buildProviderMessages,
   buildProviderToolDefs,
   decideLazyMcp,
+  rememberAdvertisedToolNames,
   streamOnce,
 } from "../agent-messages.js";
+import { resolveDeferredWire } from "../../tools/wirePolicy.js";
 import {
   runOneTool,
   emitTokenEstimateIfNeeded,
   type ToolExecResult,
 } from "../agent-tools.js";
-import { estimateEventTokens, extractPlan, usageSignalsCompact, HARD_TRIM_RATIO, compactionGeometry } from "../../compaction/compaction.js";
+import {
+  estimateEventTokens,
+  extractPlan,
+  midRunCompactPressure,
+  HARD_TRIM_RATIO,
+  PROVIDER_INPUT_COMPACTION_RATIO,
+  compactionGeometry,
+  measureToolInputChars,
+  truncateToolCallInput,
+  TOOL_INPUT_SPILL_CHARS,
+} from "../../compaction/compaction.js";
 import { classifyProviderFailure, isTransientError } from "../transientError.js";
 import { estimateTokens, lookupContextWindow } from "../../compaction/tokens.js";
 import {
@@ -53,6 +65,7 @@ import {
   isParallelSafeTool,
   runToolsWithBarrier,
 } from "../agent-barrier.js";
+import { enforceToolResultBudget } from "../agent-toolBudget.js";
 import {
   DEFAULT_CONVERGENCE_CAP,
   CONVERGENCE_HARD_SLACK,
@@ -97,18 +110,28 @@ import {
 import type { AgentDeps, AgentRunInput, AgentRunResult } from "../agent-types.js";
 
 /**
- * Convenience for a conversational close: when the turn ends with no pending
- * steps, close leftover in_progress steps from this run. Soft stops with
- * remaining pending work are left alone for the next user message.
+ * On a normal conversational close with visible final text: mark every
+ * unfinished plan step completed. Looks at history + this run (the plan event
+ * often lives only in history). Soft mid-run nudges still leave pending work
+ * alone until the model actually finishes.
  */
-async function closeFinishedPlan(produced: Event[], emit: (e: Event) => Promise<void>): Promise<void> {
-  const plan = [...produced].reverse().find((e): e is Extract<Event, { type: "plan" }> => e.type === "plan");
+async function closeFinishedPlan(
+  history: Event[],
+  produced: Event[],
+  emit: (e: Event) => Promise<void>,
+  opts: { finalText: string },
+): Promise<void> {
+  if (!opts.finalText.trim()) return;
+  const plan = [...history, ...produced]
+    .reverse()
+    .find((e): e is Extract<Event, { type: "plan" }> => e.type === "plan");
   if (!plan) return;
-  if (plan.steps.some((s) => s.status === "pending")) return;
-  if (!plan.steps.some((s) => s.status === "in_progress")) return;
+  if (!plan.steps.some((s) => s.status !== "completed")) return;
   await emit({
     type: "plan",
-    steps: plan.steps.map((s) => (s.status === "in_progress" ? { ...s, status: "completed" } : s)),
+    steps: plan.steps.map((s) =>
+      s.status === "completed" ? s : { ...s, status: "completed" as const },
+    ),
   });
 }
 
@@ -227,37 +250,31 @@ export async function runAgent(
     deps.config.maxTokens ?? modelWindow.maxOutputTokens ?? 8_192,
   );
   // Hard send ceiling: configured window minus system prompt + output headroom.
-  // This bounds a SINGLE request's prompt (system + transcript + output room) —
-  // a different concept from the history-size compaction trigger below, so it
-  // keeps its own formula (it alone subtracts `systemReserve`).
+  // Bounds a SINGLE request's prompt only — never use this as the history
+  // compaction trigger (provider usage already includes the system prompt).
   const hardBudget = Math.max(
     4_000,
     contextWindow - systemReserve - outputReserve - 1_024,
   );
-  // Auto-compact trigger: ask the session to compact when the live transcript
-  // reaches this token count. Must match the session's `maybeCompact` trigger
-  // (both come from shared `compactionGeometry` so they can't drift). Capped
-  // at `hardBudget` so history alone never exceeds one request's capacity.
-  const autoTrigger = Math.min(
-    hardBudget,
-    compactionGeometry({
-      window: contextWindow,
-      thresholdFraction: deps.config.compactionThreshold,
-      maxTokens: deps.config.maxTokens,
-      maxOutputTokens: modelWindow.maxOutputTokens,
-    }).hardTrigger,
-  );
-  // Soft mid-history fold is opt-in (`maxContextTokens`). Default is
-  // append-only until hard-window / auto-compact — rewriting earlier
-  // tool_results every turn breaks provider prompt cache (keep
-  // the prefix byte-stable and only replace on real compaction).
+  // Same geometry as session `maybeCompact`. Never min() with hardBudget:
+  // that double-counts system/output reserves and fires far too early.
+  const autoTrigger = compactionGeometry({
+    window: contextWindow,
+    thresholdFraction: deps.config.compactionThreshold,
+    maxTokens: deps.config.maxTokens,
+    maxOutputTokens: modelWindow.maxOutputTokens,
+  }).hardTrigger;
+  // Soft escalate (`maxContextTokens`) and count-fold
+  // (`maxToolResultsInContext`) are opt-in: both rewrite mid-history and bust
+  // the prompt-cache prefix. Default rewrites nothing but a hard trim / summary.
   const softConfigured = deps.config.maxContextTokens;
   const contextBudget =
     softConfigured !== undefined && softConfigured > 0
       ? Math.max(8_000, Math.min(hardBudget, softConfigured))
       : undefined;
-  // Rolling tool-output window is also opt-in (`maxToolResultsInContext`).
   const maxUnfoldedToolResults = deps.config.maxToolResultsInContext;
+  const stableSizeFold = false;
+  const foldStubMemo = deps.foldedToolResultStubs;
   /** Last provider-reported input size, used for next-turn pressure checks. */
   let lastInputTokens = Math.max(0, deps.lastProviderInputTokens ?? 0);
 
@@ -372,6 +389,7 @@ export async function runAgent(
           id: `msg_${randomUUID()}`,
           role: "user",
           content: [{ type: "text", text: item.text }],
+          steer: true,
         });
       }
     }
@@ -388,7 +406,11 @@ export async function runAgent(
     // maxTurns and the convergence cap), urge synthesis on the last turns. On
     // the final turn hard-disable tool calls (toolChoice:"none") as a backstop
     // — fires even when maxTurns is unlimited.
+    // Soft/strong nudges stay in `<runtime_context>`. Tool-lock wrap-up copy
+    // goes as a trailing user message so locking does not rewrite the cached
+    // prefix — only the suffix + toolChoice change.
     let lockToolsThisTurn = false;
+    let wrapUpTrailingUser: string | undefined;
     let budgetWarning = false;
     if (Number.isFinite(windDownAt) && turn > 0) {
       const remaining = windDownAt - turn;
@@ -398,16 +420,14 @@ export async function runAgent(
       if (subagentSynthesisBonus || remaining <= 1) {
         lockToolsThisTurn = true;
         budgetWarning = true;
-        systemSteerNotices.push(
-          deps.isSubagent
-            ? "Turn budget reached. Do NOT call any more tools. Write your structured " +
-                `conclusion NOW (${subagentConclusionShape(deps.subagentProfile)}). ` +
-                "Partial-but-synthesized beats stopping mid-exploration. Note " +
-                "anything left unverified."
-            : "You have reached the turn budget for this task. Do NOT call any more tools. " +
-                "Using only what you already have, write your final answer now. If some detail " +
-                "is still unverified, say so explicitly rather than looping to verify it.",
-        );
+        wrapUpTrailingUser = deps.isSubagent
+          ? "Turn budget reached. Do NOT call any more tools. Write your structured " +
+              `conclusion NOW (${subagentConclusionShape(deps.subagentProfile)}). ` +
+              "Partial-but-synthesized beats stopping mid-exploration. Note " +
+              "anything left unverified."
+          : "You have reached the turn budget for this task. Do NOT call any more tools. " +
+              "Using only what you already have, write your final answer now. If some detail " +
+              "is still unverified, say so explicitly rather than looping to verify it.";
       } else if (remaining <= remainingNudgeAt) {
         budgetWarning = true;
         systemSteerNotices.push(
@@ -424,18 +444,16 @@ export async function runAgent(
     // embedding the exact stall count) so same-tier turns share a cacheable tail.
     if (!lockToolsThisTurn && turnsSinceNoProgress >= noProgressLock) {
       lockToolsThisTurn = true;
-      systemSteerNotices.push(
-        deps.isSubagent
-          ? "You have gone many turns without changing any durable state (no writes, edits, " +
-              "or sub-agent conclusions) — you are re-checking in circles. Do NOT call any more " +
-              `tools. Write your structured conclusion NOW (${subagentConclusionShape(deps.subagentProfile)}) ` +
-              "from what you already have. Note anything left unverified instead of looping to verify it."
-          : "You have gone many turns without changing any durable state (no writes or edits) " +
-              "— you are verifying in circles. Do NOT call any more tools. Using only what you " +
-              "already have, write your final answer now: what you found, what is still " +
-              "unverified or unfinished, and the recommended next step. Mark unverified " +
-              "details as such rather than looping to confirm them.",
-      );
+      wrapUpTrailingUser = deps.isSubagent
+        ? "You have gone many turns without changing any durable state (no writes, edits, " +
+            "or sub-agent conclusions) — you are re-checking in circles. Do NOT call any more " +
+            `tools. Write your structured conclusion NOW (${subagentConclusionShape(deps.subagentProfile)}) ` +
+            "from what you already have. Note anything left unverified instead of looping to verify it."
+        : "You have gone many turns without changing any durable state (no writes or edits) " +
+            "— you are verifying in circles. Do NOT call any more tools. Using only what you " +
+            "already have, write your final answer now: what you found, what is still " +
+            "unverified or unfinished, and the recommended next step. Mark unverified " +
+            "details as such rather than looping to confirm them.";
     } else if (!lockToolsThisTurn && turnsSinceNoProgress >= noProgressStrong) {
       systemSteerNotices.push(
         "You have made no durable progress (no writes, edits, or conclusions) for many turns. " +
@@ -457,17 +475,15 @@ export async function runAgent(
     // same tool lock. Only fires when the write ladder has not already locked.
     if (!lockToolsThisTurn && turnsSinceNoExploration >= NO_EXPLORATION_LOCK_TURNS) {
       lockToolsThisTurn = true;
-      systemSteerNotices.push(
-        deps.isSubagent
-          ? "You have read and searched for many turns. Even if each turn turned up something, " +
-              "you are past the point of diminishing returns. Do NOT call any more tools. Write " +
-              `your structured conclusion NOW (${subagentConclusionShape(deps.subagentProfile)}) ` +
-              "from what you already have, and note what is still unverified."
-          : "You have read and searched for many turns without reaching a conclusion. Do NOT call " +
-              "any more tools. Using only what you already have, state your findings now: the most " +
-              "likely explanation, the evidence for it, and what remains unverified or blocked — " +
-              "rather than continuing to gather more.",
-      );
+      wrapUpTrailingUser = deps.isSubagent
+        ? "You have read and searched for many turns. Even if each turn turned up something, " +
+            "you are past the point of diminishing returns. Do NOT call any more tools. Write " +
+            `your structured conclusion NOW (${subagentConclusionShape(deps.subagentProfile)}) ` +
+            "from what you already have, and note what is still unverified."
+        : "You have read and searched for many turns without reaching a conclusion. Do NOT call " +
+            "any more tools. Using only what you already have, state your findings now: the most " +
+            "likely explanation, the evidence for it, and what remains unverified or blocked — " +
+            "rather than continuing to gather more.";
     } else if (!lockToolsThisTurn && turnsSinceNoExploration >= NO_EXPLORATION_STRONG_TURNS) {
       systemSteerNotices.push(
         "You have spent many turns reading and searching. Step back and synthesize: state your " +
@@ -518,19 +534,34 @@ export async function runAgent(
 
     await emit({ type: "status", status: "running" });
 
-    // Mid-run compaction before each model step: when the live transcript (or
-    // last API input) approaches the configured window, persist a summary
-    // compaction and resync history so growth stays bounded.
+    // Mid-run: prune old tool bodies first (cheap when under trigger), then
+    // summary-compact if the live transcript still presses the window.
+    if (deps.pruneNow) {
+      try {
+        const next = await deps.pruneNow();
+        if (next) {
+          input.history = next;
+          produced.length = 0;
+          lastInputTokens = 0;
+        }
+      } catch {
+        /* best-effort */
+      }
+    }
     if (deps.compactNow && deps.config.autoCompact !== false) {
-      // Estimate the transcript once here. `liveTokens` adds the fixed
-      // system-prompt reserve, so it dominates a bare
-      // shouldCompact(transcript, autoTrigger) check against the same trigger.
-      const liveTokens =
-        estimateEventTokens([...input.history, ...produced], estimateTokens) + systemReserve;
-      const pressure =
-        liveTokens >= autoTrigger ||
-        (lastInputTokens > 0 &&
-          usageSignalsCompact({ input: lastInputTokens, output: 0 }, autoTrigger));
+      // Match session maybeCompact: transcript vs hardTrigger; provider input
+      // vs full contextWindow (usage already includes system — do not add
+      // systemReserve here or compare against hardBudget).
+      const transcriptTokens = estimateEventTokens(
+        [...input.history, ...produced],
+        estimateTokens,
+      );
+      const pressure = midRunCompactPressure({
+        transcriptTokens,
+        lastInputTokens,
+        hardTrigger: autoTrigger,
+        contextWindow,
+      });
       if (pressure) {
         try {
           const next = await deps.compactNow();
@@ -560,11 +591,59 @@ export async function runAgent(
       // No calibration yet — keep headroom; heuristic under-counts CJK/tools.
       sendHardBudget = Math.max(4_000, Math.floor(hardBudget * HARD_TRIM_RATIO));
     }
-    let providerMessages = buildProviderMessages(input.history, produced, input.userText, userImages, {
-      contextBudget,
-      hardBudget: sendHardBudget,
-      maxUnfoldedToolResults,
-    });
+    // Under the auto-compact band, raise the trim ceiling so the send view
+    // stays stable and summary compaction shrinks instead of a hard-trim
+    // rewriting the cached prefix.
+    const nearWindow =
+      lastInputTokens <= 0 ||
+      lastInputTokens >= Math.floor(contextWindow * PROVIDER_INPUT_COMPACTION_RATIO);
+    const trimBudget = nearWindow
+      ? sendHardBudget
+      : Math.max(sendHardBudget, estLive + 1_024);
+    // Prefer summary compaction over silent mid-history hard-trim when the
+    // send view would otherwise rewrite already-cached tool_result bodies.
+    let foldAttemptedCompact = false;
+    const buildSendView = (budget: number) =>
+      buildProviderMessages(input.history, produced, input.userText, userImages, {
+        contextBudget,
+        hardBudget: budget,
+        maxUnfoldedToolResults,
+        stableSizeFold,
+        ...(foldStubMemo ? { stubMemo: foldStubMemo } : {}),
+        onFolded: (foldedCount) => {
+          if (foldedCount <= 0) return;
+          // Observability only — mid-history fold busts the prompt-cache prefix.
+          process.stderr.write(
+            `[agent] folded ${foldedCount} tool_result(s) for send budget\n`,
+          );
+        },
+      });
+    let providerMessages = buildSendView(trimBudget);
+    if (
+      nearWindow &&
+      !foldAttemptedCompact &&
+      deps.compactNow &&
+      deps.config.autoCompact !== false
+    ) {
+      // Re-estimate: if hard-trim would fire, compact first then rebuild.
+      const estAfter = estimateEventTokens([...input.history, ...produced], estimateTokens);
+      if (estAfter > trimBudget) {
+        foldAttemptedCompact = true;
+        try {
+          const next = await deps.compactNow();
+          if (next) {
+            input.history = next;
+            produced.length = 0;
+            lastInputTokens = 0;
+            providerMessages = buildSendView(
+              Math.max(sendHardBudget, estimateEventTokens([...input.history, ...produced], estimateTokens) + 1_024),
+            );
+          }
+        } catch {
+          /* hard-trim path below still applies */
+        }
+      }
+    }
     // The view actually sent to the provider this request: `providerMessages`
     // after an optional plugin context transform (see below). Hoisted here so
     // the cache-warm replay can capture the SAME messages that were streamed.
@@ -602,7 +681,15 @@ export async function runAgent(
       lazyPlugin,
       model: deps.config.model,
       toolExposure: deps.config.toolExposure,
+      previouslyAdvertised: deps.advertisedToolNames,
+      deferredWire: resolveDeferredWire(deps.config),
     });
+    if (deps.advertisedToolNames) {
+      rememberAdvertisedToolNames(
+        deps.advertisedToolNames,
+        providerTools.map((t) => t.name),
+      );
+    }
     const liveContext = buildLiveContext([...input.history, ...produced], produced, { planStalled, systemNotices: systemSteerNotices, relevantMemories: deps.relevantMemories });
 
  // Consistency assertion: verify the non-folded provider message tail matches
@@ -702,6 +789,8 @@ export async function runAgent(
               // rejection and neither is fixed by token compaction.
               maxUnfoldedToolResults: 0,
               dropImages: true,
+              stableSizeFold: false,
+              ...(foldStubMemo ? { stubMemo: foldStubMemo } : {}),
             },
           );
           await emitAux({
@@ -743,6 +832,8 @@ export async function runAgent(
             contextBudget,
             hardBudget: Math.max(3_000, Math.floor(sendHardBudget * step)),
             maxUnfoldedToolResults,
+            stableSizeFold,
+            ...(foldStubMemo ? { stubMemo: foldStubMemo } : {}),
           });
           await emitAux({
             type: "retry",
@@ -876,7 +967,14 @@ export async function runAgent(
       );
       let degenerated = false;
       try {
-        for await (const ev of streamOnce(deps.provider, deps, sendMessages, providerTools, id, { liveContext, onRetry, onRateLimit: deps.onRateLimit, toolChoice: lockToolsThisTurn ? "none" : undefined, steerSignal })) {
+        for await (const ev of streamOnce(deps.provider, deps, sendMessages, providerTools, id, {
+          liveContext,
+          onRetry,
+          onRateLimit: deps.onRateLimit,
+          toolChoice: lockToolsThisTurn ? "none" : undefined,
+          steerSignal,
+          trailingUser: wrapUpTrailingUser,
+        })) {
           if (deps.signal?.aborted) break;
           if (steerSignal?.aborted) { steeredMidStream = true; break; }
           switch (ev.kind) {
@@ -1026,19 +1124,8 @@ export async function runAgent(
               finishReason = ev.finishReason;
               break;
           }
-          // Mid-stream steer: a user correction arrived mid-turn. If no
-          // tool call has started, cut the stream to drain the correction and
-          // re-sample keeping the partial text. Once a tool_call is streaming
-          // we don't preempt (ambiguous); it lands after the current tool batch.
-          if (
-            !steeredMidStream &&
-            callIds.size === 0 &&
-            toolCalls.length === 0 &&
-            deps.peekSteering?.() === true
-          ) {
-            steeredMidStream = true;
-            break;
-          }
+          // Steers wait for this stream + tool batch to finish (no mid-stream
+          // cut). See session-steer.ts — corrections land at the next turn top.
           // A detected repetition loop ends the stream immediately; the error
           // is surfaced below like any other turn failure.
           if (degenerated) break;
@@ -1098,8 +1185,67 @@ export async function runAgent(
     if (assistantText.length > 0) {
       assistantContent.push({ type: "text", text: assistantText.join("") });
     }
+    // Bound oversized tool_use args at seal time (execution keeps the full
+    // input). Inline — not a send-path rewrite — so the wire prefix is frozen
+    // once sealed.
+    const inputSpills: Array<{
+      toolCallId: string;
+      name: string;
+      artifactRef: string;
+      bytes: number;
+    }> = [];
     for (const tc of toolCalls) {
-      assistantContent.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input });
+      const originalChars = measureToolInputChars(tc.input);
+      let viewInput: unknown = tc.input;
+      if (originalChars > TOOL_INPUT_SPILL_CHARS) {
+        let artifactRef: string | undefined;
+        try {
+          const body =
+            typeof tc.input === "string"
+              ? tc.input
+              : JSON.stringify(tc.input ?? null);
+          artifactRef = await deps.artifacts.write(
+            body,
+            `tool_call_input:${tc.name}`,
+          );
+        } catch {
+          /* artifact write is best-effort; still truncate the sealed view */
+        }
+        viewInput = truncateToolCallInput(tc.input, {
+          ...(artifactRef ? { artifactRef } : {}),
+        });
+        // Hard floor: unexpected shapes must still shrink before persist.
+        if (measureToolInputChars(viewInput) > TOOL_INPUT_SPILL_CHARS) {
+          const preview = (() => {
+            try {
+              return JSON.stringify(tc.input ?? null).slice(0, 700);
+            } catch {
+              return String(tc.input).slice(0, 700);
+            }
+          })();
+          viewInput = {
+            _truncated: true,
+            tool: tc.name,
+            originalChars,
+            preview,
+            ...(artifactRef ? { artifactRef } : {}),
+          };
+        }
+        if (artifactRef) {
+          inputSpills.push({
+            toolCallId: tc.id,
+            name: tc.name,
+            artifactRef,
+            bytes: originalChars,
+          });
+        }
+      }
+      assistantContent.push({
+        type: "tool_use",
+        id: tc.id,
+        name: tc.name,
+        input: viewInput,
+      });
     }
     const assistantMessage: Event = {
       type: "message",
@@ -1109,6 +1255,16 @@ export async function runAgent(
       model: deps.config.model,
     };
     await emit(assistantMessage);
+    for (const spill of inputSpills) {
+      await emit({
+        type: "content_replacement",
+        ownerId: spill.toolCallId,
+        target: "tool_call_input",
+        artifactRef: spill.artifactRef,
+        bytes: spill.bytes,
+        tool: spill.name,
+      });
+    }
 
     if (sawError && !deps.signal?.aborted && !isAbortMessage(sawError)) {
       await emit({ type: "error", message: sawError, recoverable: true });
@@ -1215,8 +1371,17 @@ export async function runAgent(
         continue;
       }
 
+      // A user correction arrived while this text-only turn was finishing —
+      // keep the run alive so the turn-top drain injects it and the model
+      // re-samples (same outcome as a post-tools steer, without cutting mid-stream).
+      if (!sawError && deps.peekSteering?.() === true) {
+        continue;
+      }
+
       // Normal conversational end: yield the turn to the user.
-      if (!sawError) await closeFinishedPlan(produced, emit);
+      if (!sawError && !isWaitingForUser(finalText)) {
+        await closeFinishedPlan(input.history, produced, emit, { finalText });
+      }
       // Offer this turn's exact request as a prompt-cache warm candidate. The
       // session decides (cost-gated) whether to keep the cached prefix alive
       // during the idle gap by replaying it with a 1-token output cap. We
@@ -1226,6 +1391,8 @@ export async function runAgent(
         const warmMessages = sendMessages;
         const warmTools = providerTools;
         const warmContext = liveContext;
+        const warmWrapUp = wrapUpTrailingUser;
+        const warmToolChoice = lockToolsThisTurn ? ("none" as const) : undefined;
         deps.onWarmableRequest({
           prefixTokens: lastInputTokens,
           replay: async (signal: AbortSignal): Promise<void> => {
@@ -1241,7 +1408,11 @@ export async function runAgent(
               warmMessages,
               warmTools,
               `warm_${randomUUID()}`,
-              { liveContext: warmContext },
+              {
+                liveContext: warmContext,
+                trailingUser: warmWrapUp,
+                toolChoice: warmToolChoice,
+              },
             )) {
               if (signal.aborted) break;
             }
@@ -1268,50 +1439,58 @@ export async function runAgent(
       hasUnparsedInput(tc)
         ? Promise.resolve<ToolExecResult>({ content: truncated ? TRUNCATED_CALL : MALFORMED_CALL, isError: true })
         : runOneTool(tc, deps, emit, agentMode, doomLoop);
+    // Always finish the planned tool batch. Steers queued mid-tools wait for
+    // the next turn-top drain rather than skipping remaining calls as errors.
     const toolResults = await runToolsWithBarrier(
       toolCalls,
-      (tc) => isParallelSafeTool(deps.tools.get(tc.name)?.permission),
+      (tc) => {
+        const def = deps.tools.get(tc.name);
+        if (def?.concurrencySafe) {
+          try {
+            return def.concurrencySafe(tc.input as never) === true;
+          } catch {
+            return false;
+          }
+        }
+        return isParallelSafeTool(def?.permission);
+      },
       runCall,
     );
-    const planOnlyTurn = toolCalls.every((tc) => tc.name === "plan_update");
+    const planOnlyTurn = toolCalls.every((tc) => {
+      if (tc.name !== "plan") return false;
+      const action = (tc.input as { action?: string } | undefined)?.action;
+      return action === "update" || action === undefined;
+    });
     // "Deny & stop": a permission handler aborted the turn. The denied results
     // are still recorded below so the transcript shows what was refused, then
     // the loop ends cleanly (no further model turns, no fake user message).
     const abortedByPermission = toolResults.some((r) => r.aborted);
+
+    // Phase 1: redact + fold-safety artifact, collect inline bodies.
+    const prepared: {
+      tc: ToolUseBlock;
+      r: ToolExecResult;
+      content: string;
+      artifactRef?: string;
+    }[] = [];
     for (let i = 0; i < toolCalls.length; i++) {
       const tc = toolCalls[i]!;
       const r = toolResults[i]!;
- // Durable-progress signal for the no-progress stall ladder: a SUCCESSFUL
- // write-permission tool (write_file/edit_file/apply_patch/…), or a task
- // conclusion / memory_write (both read-permission but state-changing).
- // Failed calls do not count — a rejected edit is not progress. Plan advances
- // are handled separately where the plan event is parsed.
       if (!r.isError) {
         const perm = deps.tools.get(tc.name)?.permission;
         if (perm === "write" || DURABLE_PROGRESS_TOOLS.has(tc.name)) {
           madeDurableProgress = true;
         }
       }
- // Exploration-progress signal (read-only analogue). A durable write already
- // counts as progress above; this only matters for turns with no write, where
- // "did we learn something new" is the honest progress question.
       if (isNewReadEvidence(tc.name, r, seenReadCommandSigs, tc.input)) {
         madeExplorationProgress = true;
       }
- // Consecutive-failure tally. A permission abort is the user's decision, not a
- // model-fixable tool failure, so it is excluded from both counts.
       if (!r.aborted) {
         if (r.isError) turnToolFailures++;
         else turnToolSuccesses++;
       }
- // Secret redaction: credentials must never reach the transcript, the
- // model context or artifacts (see redact.ts).
       let safeContent = redactSecrets(r.content, deps.redactPatterns);
       if (planOnlyTurn && !r.isError) safeContent += PLAN_ONLY_TURN;
- // Fold-safety net: any result big enough to be folded later but without an
- // artifactRef gets one now, so a fold stub always carries a way back to the
- // full text (otherwise the model re-reads the target). Skip results already
- // carrying a dedup prefix — persisting the banner would poison read_artifact.
       let artifactRef = r.artifactRef;
       if (
         !artifactRef &&
@@ -1322,24 +1501,41 @@ export async function runAgent(
         try {
           artifactRef = await deps.artifacts.write(safeContent, `tool_result:${tc.name}`);
         } catch {
- /* artifact write is best-effort; the transcript keeps full text */
+          /* best-effort */
         }
       }
+      prepared.push({ tc, r, content: safeContent, artifactRef });
+    }
+
+    // Phase 2: cap the sum of inline tool_results for this turn.
+    const budgeted = await enforceToolResultBudget(
+      prepared.map((p) => ({
+        content: p.content,
+        artifactRef: p.artifactRef,
+        name: p.tc.name,
+      })),
+      (text, hint) => deps.artifacts.write(text, hint),
+    );
+
+    // Phase 3: emit in call order.
+    for (let i = 0; i < prepared.length; i++) {
+      const p = prepared[i]!;
+      const b = budgeted[i]!;
       await emit({
         type: "tool_result",
-        toolCallId: tc.id,
-        name: tc.name,
-        content: safeContent,
-        isError: r.isError,
-        artifactRef,
-        images: r.images,
+        toolCallId: p.tc.id,
+        name: p.tc.name,
+        content: b.content,
+        isError: p.r.isError,
+        artifactRef: b.artifactRef,
+        images: p.r.images,
       });
     }
 
  // Plan updates are picked up here: if any tool returned a plan block
- // (currently only plan_update), surface it as a `plan` event. The
- // exit_plan_mode signal from plan_done becomes a `mode_request` event
- // that the session turns into a mode switch.
+ // (`plan` action=update), surface it as a `plan` event. The
+ // exit_plan_mode signal (`plan` action=done) becomes a
+ // `mode_request` event that the session turns into a mode switch.
     for (let i = 0; i < toolCalls.length; i++) {
       const r = toolResults[i]!;
       if (r.blocks) {
@@ -1380,14 +1576,14 @@ export async function runAgent(
                 await emit({
                   type: "mode_request",
                   mode: "agent",
-                  reason: "plan approved via plan_done",
+                  reason: "plan approved via plan tool",
                 });
               } else if (
                 parsed.type === "mode_request" &&
                 (parsed.mode === "chat" || parsed.mode === "plan" || parsed.mode === "agent")
               ) {
                 // suggest_mode accepted (by the user or auto-accept) → switch,
-                // via the same mode_request channel plan_done uses.
+                // via the same mode_request channel plan action=done uses.
                 await emit({
                   type: "mode_request",
                   mode: parsed.mode,
@@ -1399,8 +1595,7 @@ export async function runAgent(
                 typeof parsed.objective === "string" &&
                 parsed.objective.length > 0
               ) {
-                // start_goal: the model escalated the task to a long-horizon
-                // goal loop. Surface the request; the host drives rounds.
+                // goal action=start: escalate to a long-horizon loop.
                 await emit({
                   type: "goal_request",
                   objective: parsed.objective,
@@ -1411,9 +1606,8 @@ export async function runAgent(
                 parsed.type === "goal_status" &&
                 (parsed.status === "completed" || parsed.status === "blocked")
               ) {
-                // goal_status: the model reported the goal's terminal state via
-                // the structured tool. Surface it as a goal_status event the
-                // goal loop reads ahead of the text markers.
+                // goal action=status: terminal state via the structured tool.
+                // Surface as a goal_status event ahead of text markers.
                 await emit({
                   type: "goal_status",
                   status: parsed.status,

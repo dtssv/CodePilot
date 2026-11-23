@@ -7,6 +7,9 @@ import type { ToolRegistry } from "../tools/types.js";
 import { BoundedSinkQueue, type SessionEventSink } from "../session/sessionSink.js";
 import { jsonSchemaToZod } from "../mcp/sessionBind.js";
 
+/** Wall-clock ceiling for a single plugin tool invocation (bash-aligned). */
+export const PLUGIN_TOOL_TIMEOUT_MS = 60_000;
+
 export type PluginHost = {
   pluginContextTransform:
     | ((view: ProviderMessage[]) => ProviderMessage[])
@@ -80,9 +83,21 @@ export function registerPluginTool(host: PluginHost, def: PluginToolDef): void {
     source: "plugin",
     execute: async (input, ctx) => {
       // Run the plugin's handler with an ABI-safe context subset. Any throw
-      // becomes an error tool_result, never a crash (fail-soft).
+      // or wall-clock timeout becomes an error tool_result, never a crash.
+      const timeoutMs = PLUGIN_TOOL_TIMEOUT_MS;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`plugin tool "${name}" timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+        timer.unref?.();
+      });
       try {
-        const r = await def.execute(input, { cwd: ctx.cwd, signal: ctx.signal });
+        const r = await Promise.race([
+          def.execute(input, { cwd: ctx.cwd, signal: ctx.signal }),
+          timeoutPromise,
+        ]);
         return {
           content:
             typeof r?.content === "string" ? r.content : String(r?.content ?? ""),
@@ -93,6 +108,8 @@ export function registerPluginTool(host: PluginHost, def: PluginToolDef): void {
           content: `plugin tool "${name}" failed: ${(err as Error).message}`,
           isError: true,
         };
+      } finally {
+        if (timer) clearTimeout(timer);
       }
     },
   });

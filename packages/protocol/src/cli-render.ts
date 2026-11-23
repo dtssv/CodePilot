@@ -83,7 +83,7 @@ export class PrettyRenderer {
         this.reasoningOpen.delete(e.id);
         return;
       case "tool_call": {
-        if (e.name === "plan_update") return;
+        if (e.name === "plan") return;
         const t = target(e.input);
         this.calls.set(e.id, { name: e.name, target: t, at: Date.now() });
         const [, active] = verbs(e.name);
@@ -92,7 +92,7 @@ export class PrettyRenderer {
       }
       case "tool_result": {
         const call = this.calls.get(e.toolCallId);
-        if (!call && e.name === "plan_update") return;
+        if (!call && e.name === "plan") return;
         this.calls.delete(e.toolCallId);
         const [done] = verbs(call?.name ?? e.name);
         const took = call ? Date.now() - call.at : 0;

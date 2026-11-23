@@ -7,9 +7,11 @@ export function UsageLine({ state }: { state: AppState }): React.ReactElement | 
   if (state.usage.input === 0 && state.usage.output === 0) return null;
   const m = deriveUsageMetrics(state.usage);
   return (
-    <span className="flex items-center gap-2">
-      <span>
+    <span className="tabular-nums tracking-tight">
+      <span className="text-[var(--color-ink-dim)]">
         {formatTokens(m.total)} {t("tokens")}
+      </span>
+      <span className="text-[var(--color-ink-faint)]">
         {` · ${t("in")} ${formatTokens(m.input)}`}
         {` · ${t("out")} ${formatTokens(m.output)}`}
         {m.cache > 0

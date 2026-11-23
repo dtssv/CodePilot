@@ -126,22 +126,22 @@ Never: add packages/toolchains the user did not ask for; reformat/rename outside
 
   planning: {
     section: "planning",
-    requires: ["plan_update"],
+    requires: ["plan"],
     render: () => `## Planning and Task State
 
-- **One primary tracker** — \`plan_update\` for step state (see its schema for fields and when to plan). Do not double-track with ad-hoc lists; \`task\`/\`task_board\` do not replace the plan.
+- **One primary tracker** — call \`plan\` as \`{ "action": "update", "steps": [...] }\` (or \`action: "done"\` to submit). \`action\` is required — never \`{ "steps": [...] }\` alone. Do not double-track with ad-hoc lists; \`task\`/\`task_board\` do not replace the plan.
 - **Plan when ≥3 mutate/verify/decision steps** (pure reads do **not** count); prefer no plan over a one-step plan.
 - Exactly one \`in_progress\`; update in the same turn as the work — never a plan-only turn or an unchanged re-send.
-- **Unfinished ⇒ keep working or ask.** Drop steps you are no longer doing from the next \`plan_update\` (statuses are only pending|in_progress|completed — no blocked/cancelled).
+- **Unfinished ⇒ keep working or ask.** Statuses: pending | in_progress | completed. Remove steps that are no longer relevant from the next \`plan\` update entirely; if blocked, keep \`in_progress\` and ask (or add a concrete unblock step).
 - **Step quality.** Good: "Re-run failing auth test → fix session expiry in \`auth.ts\` → re-run that test → run full suite". Bad: "Investigate → Fix bugs → Done" (no path, no check).`,
   },
 
   goals: {
     section: "goals",
-    requires: ["start_goal"],
+    requires: ["goal"],
     render: () => `## Long-horizon goals
 
-Use \`start_goal\` only for multi-round work with a clear acceptance bar that needs repeated plan→verify loops. Ordinary refactors, bugfixes, and few-step tasks stay on \`plan_update\` — do not wrap them in a goal loop.`,
+Use \`goal\` (\`action: "start"\`) only for multi-round work with a clear acceptance bar that needs repeated plan→verify loops. Ordinary refactors, bugfixes, and few-step tasks stay on \`plan\` — do not wrap them in a goal loop.`,
   },
 
   testing: {

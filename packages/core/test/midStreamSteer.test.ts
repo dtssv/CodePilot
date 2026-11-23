@@ -1,7 +1,7 @@
-// Mid-stream steering: a user correction that arrives while the model is
-// still emitting a turn cuts the provider stream at a safe boundary (before any
-// tool call), keeps the partial text, and re-samples with the correction as a
-// user message — all within the same prompt, without marking the run cancelled.
+// Soft steering: a user correction that arrives while the model is streaming
+// waits for the current stream (+ any tool batch) to finish, then lands as a
+// user message at the next turn boundary — never aborting mid-stream or
+// marking remaining tools as interrupted.
 
 import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -18,12 +18,10 @@ import type { ChatProvider, StreamChatOptions, StreamEvent } from "../src/provid
 import type { Event } from "../src/types.js";
 
 /**
- * On the first stream the provider emits one text delta, then waits for the
- * host to raise a steer (signalled via `onFirstDelta`). Once the steer signal
- * aborts it stops yielding — exactly how a real provider reacts to an aborted
- * fetch. Subsequent streams answer normally.
+ * First stream emits text, queues a steer mid-stream via `onFirstDelta`, then
+ * finishes the turn. Second stream answers after the steer is drained.
  */
-class SteerableProvider implements ChatProvider {
+class SoftSteerProvider implements ChatProvider {
   readonly name = "mock";
   defaultModel = "mock-large";
   smallModel = "mock-small";
@@ -35,14 +33,9 @@ class SteerableProvider implements ChatProvider {
     const i = this.idx++;
     if (i === 0) {
       yield { kind: "text_delta", messageId: "m", text: "starting the wrong approach" };
-      // The host now raises a steer; the agent aborts this stream at the next
-      // boundary. Give the microtask queue a chance to propagate the abort.
       this.onFirstDelta();
-      for (let n = 0; n < 50 && !opts.signal?.aborted; n++) {
-        await new Promise((r) => setTimeout(r, 1));
-      }
-      if (opts.signal?.aborted) return;
-      yield { kind: "text_delta", messageId: "m", text: " (should not be reached)" };
+      await new Promise((r) => setTimeout(r, 5));
+      yield { kind: "text_delta", messageId: "m", text: " (stream still finishes)" };
       yield { kind: "done", finishReason: "stop" };
       return;
     }
@@ -65,20 +58,18 @@ function deps(cwd: string, provider: ChatProvider, extra: Partial<AgentDeps> = {
   };
 }
 
-describe("runAgent mid-stream steering", () => {
-  it("cuts the stream on a pending user steer, keeps partial text, re-samples with the correction", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "midsteer-"));
+describe("runAgent soft steering (wait for current step)", () => {
+  it("lets the stream finish, then re-samples with the correction", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "softsteer-"));
     const emitted: Event[] = [];
 
-    // Minimal host-side queue + steer controller, mirroring the Session wiring.
     let pendingSteer: string | null = null;
-    let steerController = new AbortController();
     const raiseSteer = (text: string): void => {
       pendingSteer = text;
-      steerController.abort();
+      // Soft steer: queue only — do not abort the stream.
     };
 
-    const provider = new SteerableProvider(() => raiseSteer("use the right approach instead"));
+    const provider = new SoftSteerProvider(() => raiseSteer("use the right approach instead"));
 
     await runAgent(
       { history: [], userText: "go" },
@@ -86,10 +77,7 @@ describe("runAgent mid-stream steering", () => {
         ...deps(dir, provider),
         onEvent: (e) => void emitted.push(e),
         peekSteering: () => pendingSteer !== null,
-        getSteerSignal: () => steerController.signal,
         drainSteering: () => {
-          // Rotate the controller so the next stream starts un-aborted.
-          if (steerController.signal.aborted) steerController = new AbortController();
           if (pendingSteer === null) return [];
           const out = [{ source: "user" as const, text: pendingSteer }];
           pendingSteer = null;
@@ -98,45 +86,38 @@ describe("runAgent mid-stream steering", () => {
       },
     );
 
-    // The steer became a real user message in the transcript.
     const userSteer = emitted.filter(
-      (e) => e.type === "message" && e.role === "user" &&
+      (e) =>
+        e.type === "message" &&
+        e.role === "user" &&
         e.content.some((c) => c.type === "text" && c.text.includes("use the right approach")),
     );
     expect(userSteer).toHaveLength(1);
 
-    // The partial text from the cut stream was kept as an assistant message.
     const assistantTexts = emitted
       .filter((e): e is Extract<Event, { type: "message" }> => e.type === "message" && e.role === "assistant")
       .flatMap((e) => e.content)
       .filter((c): c is { type: "text"; text: string } => c.type === "text")
       .map((c) => c.text);
     expect(assistantTexts.some((t) => t.includes("starting the wrong approach"))).toBe(true);
-    // The post-steer boundary text was never produced (stream was cut).
-    expect(assistantTexts.some((t) => t.includes("should not be reached"))).toBe(false);
-    // The re-sampled answer is present.
+    // Soft steer does not cut the stream mid-turn.
+    expect(assistantTexts.some((t) => t.includes("stream still finishes"))).toBe(true);
     expect(assistantTexts.some((t) => t.includes("redone the right way"))).toBe(true);
 
-    // The run did NOT end as cancelled: there is no abort/cancel error event.
     const errorEvents = emitted.filter((e) => e.type === "error");
     expect(errorEvents).toHaveLength(0);
-
-    // The provider was called at least twice (initial + re-sample).
     expect(provider.calls.length).toBeGreaterThanOrEqual(2);
 
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("does not preempt once a tool call has started; the steer waits for the next boundary", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "midsteer-tool-"));
+  it("does not skip remaining tools when a steer arrives mid-batch", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "softsteer-tools-"));
     const emitted: Event[] = [];
-    let pendingSteer: string | null = "late correction";
-    let steerController = new AbortController();
-    // Steer is already pending AND aborted before the stream starts — but the
-    // first stream emits a tool_call, so the peek guard must NOT preempt it.
-    steerController.abort();
+    let pendingSteer: string | null = null;
+    let firstToolStarted = false;
 
-    class ToolFirstProvider implements ChatProvider {
+    class TwoToolsProvider implements ChatProvider {
       readonly name = "mock";
       defaultModel = "mock-large";
       smallModel = "mock-small";
@@ -144,11 +125,12 @@ describe("runAgent mid-stream steering", () => {
       async *stream(): AsyncIterable<StreamEvent> {
         const i = this.idx++;
         if (i === 0) {
-          yield { kind: "tool_call", toolCall: { id: "t1", name: "noop", input: {} } };
+          yield { kind: "tool_call", toolCall: { id: "t1", name: "noop", input: { n: 1 } } };
+          yield { kind: "tool_call", toolCall: { id: "t2", name: "noop", input: { n: 2 } } };
           yield { kind: "done", finishReason: "tool_calls" };
           return;
         }
-        yield { kind: "text_delta", messageId: "m", text: "done after tool" };
+        yield { kind: "text_delta", messageId: "m", text: "done after both tools + steer" };
         yield { kind: "done", finishReason: "stop" };
       }
     }
@@ -157,22 +139,29 @@ describe("runAgent mid-stream steering", () => {
     registry.register({
       name: "noop",
       description: "noop",
-      inputSchema: z.object({}),
-      permission: "read",
-      async execute() {
-        return { content: "noop ok" };
+      inputSchema: z.object({ n: z.number() }),
+      // Exclusive (execute) so tools serialize — a mid-batch steer used to skip
+      // the second call; soft steer must still run it.
+      permission: "execute",
+      async execute(input: { n: number }) {
+        if (!firstToolStarted) {
+          firstToolStarted = true;
+          pendingSteer = "nudge mid tools";
+        }
+        return { content: `noop ${input.n}` };
       },
     } as never);
 
     await runAgent(
       { history: [], userText: "go" },
       {
-        ...deps(dir, new ToolFirstProvider(), { tools: registry }),
+        ...deps(dir, new TwoToolsProvider(), {
+          tools: registry,
+          permissions: new PermissionEngine({ permissionMode: "yolo" }),
+        }),
         onEvent: (e) => void emitted.push(e),
         peekSteering: () => pendingSteer !== null,
-        getSteerSignal: () => steerController.signal,
         drainSteering: () => {
-          if (steerController.signal.aborted) steerController = new AbortController();
           if (pendingSteer === null) return [];
           const out = [{ source: "user" as const, text: pendingSteer }];
           pendingSteer = null;
@@ -181,13 +170,17 @@ describe("runAgent mid-stream steering", () => {
       },
     );
 
-    // The tool call executed (not preempted).
     const toolResults = emitted.filter((e) => e.type === "tool_result");
-    expect(toolResults.length).toBeGreaterThanOrEqual(1);
-    // The steer still landed as a user message at the post-tool boundary.
+    expect(toolResults).toHaveLength(2);
+    for (const r of toolResults) {
+      expect(r.type === "tool_result" && r.isError).toBeFalsy();
+      expect(r.type === "tool_result" && r.content).not.toMatch(/interrupted/);
+    }
     const userSteer = emitted.filter(
-      (e) => e.type === "message" && e.role === "user" &&
-        e.content.some((c) => c.type === "text" && c.text.includes("late correction")),
+      (e) =>
+        e.type === "message" &&
+        e.role === "user" &&
+        e.content.some((c) => c.type === "text" && c.text.includes("nudge mid tools")),
     );
     expect(userSteer).toHaveLength(1);
 

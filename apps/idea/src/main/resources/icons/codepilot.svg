@@ -1,0 +1,10 @@
+<!-- CodePilot tool window mark (light theme). Same silhouette as the VSCode
+     activity-bar glyph (apps/vscode/media/icon.svg): top bar, diagonal rising
+     stroke, vertical bar and the "i" dot. Platform icons are single-colour, so
+     the brand glyph is inlined here instead of using currentColor. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="#6C707E">
+    <path d="M4 6 L16 6 L13.5 9 L4 9 Z" />
+    <path d="M6.5 18.5 L13.5 8 L16.2 9.8 L9.2 20.3 Z" />
+    <path d="M15.5 9.5 L18.5 9.5 L18 20 L15 20 Z" />
+    <circle cx="18.5" cy="5.5" r="1.6" />
+</svg>

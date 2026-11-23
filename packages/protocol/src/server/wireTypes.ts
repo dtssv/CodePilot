@@ -186,14 +186,31 @@ export interface CommandInfoRpc {
   description: string;
   argumentHint?: string;
   /** "builtin" = shipped shared command; "project"/"user" = markdown command;
-   * "plugin" = command shipped by an installed plugin. */
-  source: "builtin" | "project" | "user" | "plugin";
+   * "plugin" = command shipped by an installed plugin;
+   * "mcp" = dynamic MCP prompt (expanded via prompts/get). */
+  source: "builtin" | "project" | "user" | "plugin" | "mcp";
   /** "local" = a client-side action (switch mode, open a picker, compact, …);
    * "prompt" = expands into a model turn. Built-ins are local; custom markdown
-   * commands are prompt. Lets a GUI client branch without a hard-coded name list. */
+   * and MCP prompt commands are prompt. Lets a GUI client branch without a
+   * hard-coded name list. */
   kind: "local" | "prompt";
 }
 export interface CommandsListResult { commands: CommandInfoRpc[]; warnings: string[]; }
+
+/** Expand a prompt-kind slash command (markdown body or MCP prompts/get). */
+export interface CommandsExpandParams {
+  /** Command name without leading `/`. */
+  name: string;
+  /** Raw argument text after the command name. */
+  args?: string;
+  cwd?: string;
+}
+export interface CommandsExpandResult {
+  prompt: string;
+  model?: string;
+  allowedTools?: string[];
+  source: CommandInfoRpc["source"];
+}
 
 /** `@`-mention completion for the composer. One endpoint, many candidate kinds. */
 export type CompletionKind = "file" | "dir" | "mcp" | "git" | "skill";
@@ -215,7 +232,11 @@ export interface CompletionCandidate {
   /** Secondary detail (relative dir, server name, symbol kind…). */
   detail?: string;
 }
-export interface WorkspaceCompleteResult { candidates: CompletionCandidate[]; }
+export interface WorkspaceCompleteResult {
+  candidates: CompletionCandidate[];
+  /** True when more matches existed than returned (caller should keep typing / drill into a folder). */
+  truncated?: boolean;
+}
 /** Resolve a (possibly bare / relative) path to an absolute one the host can
  * open, using the same workspace basename fallback as workspace/read. */
 export interface WorkspaceResolveParams { path: string; cwd?: string; }
@@ -401,6 +422,10 @@ export interface PermissionRequestParams {
   reason: string;
  /** Present when the write sits outside sandbox writable roots. */
   sandboxExpand?: { path: string };
+ /** Present when this ask is a per-command sandbox jail drop. */
+  sandboxEscalation?: true;
+  /** Live-disk before/after preview for write/edit/apply_patch approvals. */
+  preview?: string;
 }
 
 /** Wire params for the reverse `question/request` (ask_user_question / plan_done). */

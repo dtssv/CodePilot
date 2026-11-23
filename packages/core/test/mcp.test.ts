@@ -489,6 +489,46 @@ describe("McpManager with mixed transports", () => {
   });
 });
 
+describe("MCP list pagination", () => {
+  it("follows nextCursor across tools/list pages", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mcp-page-"));
+    const path = join(dir, "server.mjs");
+    writeFileSync(
+      path,
+      `
+import readline from 'node:readline';
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  if (!line.trim()) return;
+  let msg; try { msg = JSON.parse(line); } catch { return; }
+  if (msg.id === undefined) return;
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id: msg.id, result: { protocolVersion:'2024-11-05', serverInfo:{ name:'p' }, instructions: 'use carefully' } }) + '\\n');
+  } else if (msg.method === 'tools/list') {
+    if (!msg.params || !msg.params.cursor) {
+      process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id: msg.id, result: { tools: [{ name:'a', description:'A' }], nextCursor: 'p2' } }) + '\\n');
+    } else {
+      process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id: msg.id, result: { tools: [{ name:'b', description:'B' }] } }) + '\\n');
+    }
+  } else {
+    process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id: msg.id, error: { code:-32601, message:'nf' } }) + '\\n');
+  }
+});
+`,
+      "utf-8",
+    );
+    try {
+      const c = new McpStdioClient("page", { command: process.execPath, args: [path] });
+      await c.start();
+      expect(c.listTools().map((t) => t.name).sort()).toEqual(["a", "b"]);
+      expect(c.getInstructions()).toBe("use carefully");
+      await c.stop();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("Naming helpers", () => {
   it("builds and parses the mcp__server__tool form", () => {
     expect(mcpToolName("srv", "t")).toBe("mcp__srv__t");

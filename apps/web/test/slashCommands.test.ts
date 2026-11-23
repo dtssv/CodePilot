@@ -10,10 +10,33 @@ function mockCp(over: Partial<Codepilot> = {}): Codepilot {
       sessionClearContext: vi.fn(async () => ({ cleared: true })),
       undoSession: vi.fn(async () => ({ label: "x", restored: [], deleted: [] })),
       redoSession: vi.fn(async () => ({ label: "x", restored: [], deleted: [] })),
+      initWorkspace: vi.fn(async () => ({ path: "/w/AGENTS.md", created: true, skipped: false })),
+      gcSessionArtifacts: vi.fn(async () => ({
+        removed: 0,
+        bytesReclaimed: 0,
+        scanned: 0,
+        referenced: 0,
+      })),
+      startSessionGoal: vi.fn(async () => ({ accepted: true as const, running: true })),
+      exportSessionTranscript: vi.fn(async () => ({
+        format: "markdown" as const,
+        body: "# hi",
+        suggestedName: "codepilot-session-s1.md",
+      })),
+      writeWorkspace: vi.fn(async () => ({ path: "x.md", size: 1, hash: "h" })),
+      setPermissionMode: vi.fn(async (mode: string) => ({ mode })),
+      setPreset: vi.fn(async (preset: string) => ({
+        preset,
+        permissionMode: "ask",
+        sandbox: { mode: "read-only" },
+      })),
+      describeSessionHooks: vi.fn(async () => ({ text: "No hooks configured." })),
+      describeSessionAgents: vi.fn(async () => ({ text: "No custom agents." })),
     } as never,
     setMode: vi.fn(async () => {}),
     setModel: vi.fn(async () => {}),
     send: vi.fn(async () => {}),
+    resumeSession: vi.fn(async () => {}),
     ...over,
   } as never;
 }
@@ -66,14 +89,40 @@ describe("interpretSlash — local-first semantics", () => {
     expect(out.handled).toBe(false);
   });
 
-  it("a known LOCAL command this surface can't run is reported, not forwarded", async () => {
+  it("/goal starts a session goal loop locally (no model prompt)", async () => {
     const cp = mockCp();
-    const knownLocalNames = new Set(["retry", "goal", "resume"]);
-    const out = await interpretSlash("/retry", cp, { knownLocalNames });
-    // Handled locally (no forward, no model turn) even though we don't run it.
+    const out = await interpretSlash("/goal ship it", cp);
     expect(out.handled).toBe(true);
     expect(out.forward).toBeUndefined();
-    expect(out.notice).toContain("/retry");
+    expect(
+      (cp.client as never as { startSessionGoal: ReturnType<typeof vi.fn> }).startSessionGoal,
+    ).toHaveBeenCalledWith("s1", "ship it");
+    expect(cp.send).not.toHaveBeenCalled();
+  });
+
+  it("/init scaffolds AGENTS.md locally", async () => {
+    const cp = mockCp();
+    const out = await interpretSlash("/init", cp);
+    expect(out.handled).toBe(true);
+    expect(
+      (cp.client as never as { initWorkspace: ReturnType<typeof vi.fn> }).initWorkspace,
+    ).toHaveBeenCalledWith({ force: false });
+  });
+
+  it("/resume with an id resumes that session", async () => {
+    const cp = mockCp();
+    const out = await interpretSlash("/resume abc123", cp);
+    expect(out.handled).toBe(true);
+    expect(cp.resumeSession).toHaveBeenCalledWith("abc123");
+  });
+
+  it("a known LOCAL command this surface can't run is reported, not forwarded", async () => {
+    const cp = mockCp();
+    const knownLocalNames = new Set(["vim", "web", "exit"]);
+    const out = await interpretSlash("/vim on", cp, { knownLocalNames });
+    expect(out.handled).toBe(true);
+    expect(out.forward).toBeUndefined();
+    expect(out.notice).toContain("/vim");
     expect(cp.send).not.toHaveBeenCalled();
   });
 

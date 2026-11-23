@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { parsePatch, pathsFromApplyPatch } from "../src/tools/apply_patch.js";
+import { parsePatch, pathsFromApplyPatch, applyHunk, applyPatchTool } from "../src/tools/apply_patch.js";
 import { PermissionEngine } from "../src/permissions/permissions.js";
-import { applyPatchTool } from "../src/tools/apply_patch.js";
 import { resolveSandbox } from "../src/sandbox/sandbox.js";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -56,11 +55,53 @@ describe("parsePatch", () => {
     expect(ops[1]!.content).toBe("hello");
   });
 
+  it("parses Move to and @@ change_context / End of File", () => {
+    const patch = `*** Begin Patch
+*** Update File: old.ts
+*** Move to: new.ts
+@@ class Foo
+-  a
++  b
+*** End of File
+-  z
++  Z
+*** End Patch`;
+    const ops = parsePatch(patch);
+    expect(ops).toHaveLength(1);
+    expect(ops[0]!.kind).toBe("update");
+    expect(ops[0]!.path).toBe("old.ts");
+    expect(ops[0]!.moveTo).toBe("new.ts");
+    expect(ops[0]!.hunks).toHaveLength(2);
+    expect(ops[0]!.hunks![0]!.changeContext).toBe("class Foo");
+    expect(ops[0]!.hunks![1]!.eof).toBe(true);
+  });
+
   it("pathsFromApplyPatch reads headers only", () => {
     expect(pathsFromApplyPatch(sampleWithoutEndFile)).toEqual([
       "/Users/zyf/workspace/web/test/src/vehicle.js",
     ]);
     expect(pathsFromApplyPatch(sampleWithEndFile)).toEqual(["a.js", "b.js"]);
+    expect(
+      pathsFromApplyPatch(`*** Begin Patch
+*** Update File: a.ts
+*** Move to: b.ts
+*** End Patch`),
+    ).toEqual(["a.ts", "b.ts"]);
+  });
+});
+
+describe("applyHunk miss hint", () => {
+  it("includes a closest file window when context/removed lines miss", () => {
+    const original = "alpha\nhello world\ngamma\n";
+    const patch = `*** Begin Patch
+*** Update File: f.txt
+@@
+-hello wrld
++hello earth
+*** End Patch`;
+    const ops = parsePatch(patch);
+    const hunk = ops[0]!.hunks![0]!;
+    expect(() => applyHunk(original, hunk)).toThrow(/Closest in file:\nhello world/);
   });
 });
 
@@ -240,5 +281,104 @@ describe("apply_patch Add File overwrite guard", () => {
     expect(after).toContain("const b = 3;");
     // The curly-quoted line was matched as context and left exactly as it was.
     expect(after).toContain('const a = \u201Chi\u201D;');
+  });
+
+  it("Move to: renames and applies hunks", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-mv-"));
+    writeFileSync(join(dir, "old.ts"), "export const a = 1;\n");
+    const store = new FileObservationStore();
+    const patch = `*** Begin Patch
+*** Update File: old.ts
+*** Move to: new.ts
+@@
+-export const a = 1;
++export const a = 2;
+*** End Patch`;
+    const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
+    expect(res.isError).toBeUndefined();
+    expect(res.content).toMatch(/moved old\.ts → new\.ts/);
+    expect(existsSync(join(dir, "old.ts"))).toBe(false);
+    expect(readFileSync(join(dir, "new.ts"), "utf-8")).toContain("a = 2");
+  });
+
+  it("@@ change_context and End of File seek disambiguate duplicate blocks", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-eof-"));
+    writeFileSync(
+      join(dir, "dup.ts"),
+      ["class A {", "  x = 1;", "}", "class B {", "  x = 1;", "}"].join("\n") + "\n",
+    );
+    const store = new FileObservationStore();
+    const patch = `*** Begin Patch
+*** Update File: dup.ts
+@@ class B
+-  x = 1;
++  x = 2;
+*** End Patch`;
+    const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
+    expect(res.isError).toBeUndefined();
+    const after = readFileSync(join(dir, "dup.ts"), "utf-8");
+    expect(after).toContain("class A {\n  x = 1;");
+    expect(after).toContain("class B {\n  x = 2;");
+  });
+
+  it("preserves CRLF line endings on update", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-crlf-"));
+    const p = join(dir, "win.js");
+    writeFileSync(p, "const a = 1;\r\nconst b = 2;\r\n");
+    const store = new FileObservationStore();
+    const patch = `*** Begin Patch
+*** Update File: win.js
+@@
+-const b = 2;
++const b = 3;
+*** End Patch`;
+    const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
+    expect(res.isError).toBeUndefined();
+    const after = readFileSync(p, "utf-8");
+    expect(after).toBe("const a = 1;\r\nconst b = 3;\r\n");
+  });
+
+  it("rejects an ambiguous hunk that matches more than once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "cp-ap-amb-"));
+    writeFileSync(
+      join(dir, "dup.ts"),
+      ["class A {", "  x = 1;", "}", "class B {", "  x = 1;", "}"].join("\n") + "\n",
+    );
+    const store = new FileObservationStore();
+    const patch = `*** Begin Patch
+*** Update File: dup.ts
+@@
+-  x = 1;
++  x = 2;
+*** End Patch`;
+    const res = await applyPatchTool.execute({ patch }, patchCtx(dir, store));
+    expect(res.isError).toBe(true);
+    expect(res.content).toMatch(/ambiguous match/);
+    expect(readFileSync(join(dir, "dup.ts"), "utf-8")).toContain("  x = 1;");
+  });
+});
+
+describe("applyHunk CRLF / ambiguity unit", () => {
+  it("keeps CRLF when splicing", () => {
+    const out = applyHunk("a\r\nb\r\nc\r\n", {
+      lines: [
+        { type: "ctx", text: "a" },
+        { type: "del", text: "b" },
+        { type: "add", text: "B" },
+        { type: "ctx", text: "c" },
+      ],
+    });
+    expect(out).toBe("a\r\nB\r\nc\r\n");
+  });
+
+  it("throws on ambiguous exact match", () => {
+    expect(() =>
+      applyHunk("x\nx\n", {
+        lines: [
+          { type: "del", text: "x" },
+          { type: "add", text: "y" },
+        ],
+      }),
+    ).toThrow(/ambiguous/);
   });
 });

@@ -260,7 +260,53 @@ export function parseBlocks(src: string): Block[] {
     blocks.push({ kind: "para", text: para.join("\n") });
   }
 
-  return blocks;
+  return normalizeSectionNumbers(blocks);
+}
+
+/**
+ * Display-only: restart numbering under each heading. Models often emit a
+ * global `1…N` across `##` sections (and `**7. title**` fake lists) — browsers
+ * then show continuous counters under every heading. Source digits stay in the
+ * raw message; we only rewrite the block model used for render.
+ *
+ * - Ordered lists: after a heading, force `start` so the section counts from 1.
+ * - Bold-number paras (`**12. …**`): renumber from 1 within the section.
+ * Without a preceding heading, source `start` / bold digits are left alone
+ * (preserves intentional `2. CURRENT STATE` mid-document lists).
+ */
+export function normalizeSectionNumbers(blocks: Block[]): Block[] {
+  let olNext: number | null = null;
+  let boldNext = 0;
+  let seenHeading = false;
+  return blocks.map((b) => {
+    if (b.kind === "heading") {
+      olNext = 1;
+      boldNext = 0;
+      seenHeading = true;
+      return b;
+    }
+    if (b.kind === "list" && b.ordered && olNext !== null) {
+      const start = olNext;
+      olNext = start + b.items.length;
+      return start === b.start ? b : { ...b, start };
+    }
+    if (b.kind === "para" && seenHeading) {
+      // Renumber every `**N.` line (paras may merge adjacent bold titles when
+      // the model omits a blank line between them).
+      let changed = false;
+      const next = b.text
+        .split("\n")
+        .map((line) => {
+          if (!/^\*\*\d+\.\s+/.test(line)) return line;
+          boldNext++;
+          changed = true;
+          return line.replace(/^\*\*\d+\.\s+/, `**${boldNext}. `);
+        })
+        .join("\n");
+      return changed ? { ...b, text: next } : b;
+    }
+    return b;
+  });
 }
 
 // ----- rendering -------------------------------------------------------------

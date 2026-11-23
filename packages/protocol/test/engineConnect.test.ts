@@ -59,7 +59,7 @@ describe("engineConnect / serve discovery", () => {
     expect(info.token).toBe("abc");
   });
 
-  it("discoverOrSpawnDaemon spawns then waits for lockfile", async () => {
+  it("discoverOrSpawnDaemon spawns then waits for lockfile (custom spawner)", async () => {
     await clearServeInfo();
     class FakeChild extends EventEmitter {
       stderr = new EventEmitter();
@@ -93,6 +93,33 @@ describe("engineConnect / serve discovery", () => {
     });
     expect(owned).toBe(child);
     expect(info.token).toBe("spawned");
+  });
+
+  it("discoverOrSpawnDaemon orphan path returns owned null after lockfile", async () => {
+    await clearServeInfo();
+    // Publish as if an orphan daemon appeared (we do not wait on a real spawn
+    // in CI — just assert the default path does not keep an owned child when
+    // serve.json shows up promptly via a racing writer).
+    setTimeout(() => {
+      void writeServeInfo({
+        url: "ws://127.0.0.1:18765/rpc",
+        token: "orphan",
+        pid: process.pid,
+        host: "127.0.0.1",
+        port: 18765,
+        startedAt: new Date().toISOString(),
+      });
+    }, 20);
+    const { info, owned } = await discoverOrSpawnDaemon({
+      command: "true",
+      args: [],
+      waitMs: 2000,
+      // no custom spawner → orphan default; `true` exits immediately as the
+      // background job and cannot publish serve.json itself — the timeout
+      // writer above stands in for a real daemon.
+    });
+    expect(owned).toBeNull();
+    expect(info.token).toBe("orphan");
   });
 
   it("discoverOrSpawnDaemon reuses a held port without spawning when serve.json reappears", async () => {

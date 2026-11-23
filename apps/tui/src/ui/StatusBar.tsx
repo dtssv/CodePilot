@@ -12,7 +12,7 @@
  * status bar content. ANSI color codes are preserved.
  */
 import React from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useStdout } from "ink";
 import type { AgentMode, StatusLineConfig } from "@codepilot/core";
 import {
   runStatusLine,
@@ -27,6 +27,25 @@ import {
 type RateLimitSnapshot = { requestsRemaining?: number; tokensRemaining?: number; resetsInSeconds?: number };
 import type { TuiState } from "./state.js";
 import { color, formatTokens, glyph } from "./theme.js";
+import { textWidth } from "./textWidth.js";
+
+/** Separator between status segments. */
+const DOT = ` ${glyph.dot} `;
+
+interface Seg {
+  text: string;
+  color?: string;
+  dim?: boolean;
+  bold?: boolean;
+}
+
+/** Display width of a segment run, separators included. */
+function runWidth(segs: readonly Seg[]): number {
+  if (segs.length === 0) return 0;
+  let n = 0;
+  for (const s of segs) n += textWidth(s.text);
+  return n + DOT.length * (segs.length - 1);
+}
 
 // Read `color.*` at call time, not module load: the palette is mutable
 // (setTheme reassigns it), so a map captured at import would freeze the
@@ -67,6 +86,8 @@ export function StatusBar({
   // Git branch for the status-line payload — read fail-soft and cached per cwd
   // (a synchronous `git rev-parse` would be wasteful to run on every re-render).
   const [gitBranch, setGitBranch] = React.useState<string | undefined>(undefined);
+  const { stdout } = useStdout();
+  const columns = stdout.columns || 80;
   React.useEffect(() => {
     setGitBranch(readGitBranch(cwd));
   }, [cwd]);
@@ -121,48 +142,80 @@ export function StatusBar({
     state.usage.output +
     (state.usage.cacheRead ?? 0) +
     (state.usage.cacheWrite ?? 0);
-  const sep = <Text color={color.faint}> {glyph.dot} </Text>;
+
+  // Segments are added by priority until the line no longer fits. A status line
+  // that wraps is not merely ugly: Ink erases the previous frame by line count,
+  // so one extra wrapped line leaves stale text interleaved with the new frame.
+  const leftCandidates: Seg[] = [
+    { text: `${glyph.running} ${AGENT_LABEL[state.agentMode]}`, color: agentColor(state.agentMode), bold: true },
+    {
+      text: state.permissionMode,
+      ...(permColor(state.permissionMode) ? { color: permColor(state.permissionMode) } : {}),
+      ...(state.permissionMode === "ask" ? { dim: true } : {}),
+    },
+    // Drop the provider prefix first: the model name is the part being read.
+    { text: state.model ?? "model unset", dim: true },
+  ];
+  const tb = state.turnBudget;
+  const ceiling =
+    tb === undefined
+      ? null
+      : tb.windDownAt !== null && tb.maxTurns !== null
+        ? Math.min(tb.windDownAt, tb.maxTurns)
+        : (tb.windDownAt ?? tb.maxTurns);
+  if (tb && ceiling !== null) {
+    leftCandidates.push({
+      text: `turn ${tb.turn + 1}/${ceiling}`,
+      color: tb.warning ? color.warn : color.faint,
+    });
+  }
+
+  const rightCandidates: Seg[] = [
+    { text: `${formatTokens(total)} tokens`, color: color.faint },
+  ];
+  if (state.usage.costUSD !== undefined) {
+    rightCandidates.push({ text: `$${state.usage.costUSD.toFixed(4)}`, color: color.faint });
+  }
+  if (sid) rightCandidates.push({ text: sid, color: color.faint });
+
+  const avail = Math.max(16, columns - 2);
+  const GAP = 2;
+  const left: Seg[] = [];
+  for (const seg of leftCandidates) {
+    const next = [...left, seg];
+    // Always keep the model name out of the way of the two mandatory segments.
+    if (runWidth(next) + runWidth(rightCandidates.slice(0, 1)) + GAP > avail) break;
+    left.push(seg);
+  }
+  const right: Seg[] = [];
+  for (const seg of rightCandidates) {
+    const next = [...right, seg];
+    if (runWidth(left) + runWidth(next) + GAP > avail) break;
+    right.push(seg);
+  }
+
+  const renderRun = (segs: readonly Seg[], keyPrefix: string): React.ReactElement[] =>
+    segs.flatMap((s, i) => {
+      const sep = i === 0 ? [] : [<Text key={`${keyPrefix}-sep${i}`} color={color.faint}>{DOT}</Text>];
+      return [
+        ...sep,
+        <Text
+          key={`${keyPrefix}-${i}`}
+          wrap="truncate-end"
+          {...(s.color ? { color: s.color } : {})}
+          {...(s.dim ? { dimColor: true } : {})}
+          {...(s.bold ? { bold: true } : {})}
+        >
+          {s.text}
+        </Text>,
+      ];
+    });
+
   return (
-    <Box paddingX={1}>
-      <Text color={agentColor(state.agentMode)} bold>
-        {glyph.running} {AGENT_LABEL[state.agentMode]}
-      </Text>
-      {sep}
-      <Text color={permColor(state.permissionMode)} dimColor={state.permissionMode === "ask"}>
-        {state.permissionMode}
-      </Text>
-      {sep}
-      <Text dimColor>
-        {state.providerId
-          ? `${state.providerId} · ${state.model ?? "?"}`
-          : (state.model ?? "model unset")}
-      </Text>
-      {(() => {
-        // Show how far into the turn budget the run is when a finite governing
-        // ceiling exists (the lower of windDownAt / maxTurns). Hidden when both
-        // are unlimited (nothing to count down to).
-        const tb = state.turnBudget;
-        if (!tb) return null;
-        const ceiling =
-          tb.windDownAt !== null && tb.maxTurns !== null
-            ? Math.min(tb.windDownAt, tb.maxTurns)
-            : (tb.windDownAt ?? tb.maxTurns);
-        if (ceiling === null) return null;
-        return (
-          <>
-            {sep}
-            <Text color={tb.warning ? color.warn : color.faint}>
-              turn {tb.turn + 1}/{ceiling}
-            </Text>
-          </>
-        );
-      })()}
+    <Box paddingX={1} width="100%" height={1}>
+      {renderRun(left, "l")}
       <Box flexGrow={1} />
-      <Text color={color.faint}>
-        {formatTokens(total)} tokens
-        {state.usage.costUSD !== undefined ? ` ${glyph.dot} $${state.usage.costUSD.toFixed(4)}` : ""}
-        {sid ? ` ${glyph.dot} ${sid}` : ""}
-      </Text>
+      {renderRun(right, "r")}
     </Box>
   );
 }

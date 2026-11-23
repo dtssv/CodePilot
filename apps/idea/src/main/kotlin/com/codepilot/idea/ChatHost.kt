@@ -7,14 +7,20 @@ interface ChatHost {
     val component: JComponent
 
  /**
-  * Hand an editor snippet (or whole file) to the chat as a reference, WITHOUT
- * sending — the user writes their own prompt around it.
- * When [newChat] is true, open a fresh session first.
+  * Hand a file (optionally a line range) to the chat as a reference, WITHOUT
+  * sending — the user writes their own prompt around it.
+  * When [newChat] is true, open a fresh session first.
   */
-    fun addEditorContext(filePath: String, language: String?, snippet: String, newChat: Boolean)
+    fun addReference(path: String, startLine: Int?, endLine: Int?, newChat: Boolean)
 
-    /** Expand/focus this panel and open the in-webview Settings sheet (Desktop-parity). */
-    fun openSettings()
+    /** Send [question] together with the same reference ("ask about this code"). */
+    fun askAboutCode(path: String, startLine: Int?, endLine: Int?, question: String)
+
+    /**
+     * Open Settings — an editor tab in the JCEF panel, the configurable in Swing.
+     * [section] jumps to one page of the settings UI; the Swing fallback ignores it.
+     */
+    fun openSettings(section: String? = null)
 
     fun dispose()
 }

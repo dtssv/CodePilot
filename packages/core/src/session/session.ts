@@ -122,6 +122,7 @@ import {
   drainFollowUps as drainFollowUpsImpl,
   steerSystem as steerSystemImpl,
 } from "./session-steer.js";
+import { saveSessionInbox } from "./session-inbox.js";
 import {
   type PluginHost,
   setPluginContextTransform as setPluginContextTransformImpl,
@@ -154,6 +155,7 @@ import {
   pinnedMessageIds as pinnedMessageIdsImpl,
   clearWorkingContext as clearWorkingContextImpl,
   sessionMaybeCompact as sessionMaybeCompactImpl,
+  sessionMaybePruneToolResults as sessionMaybePruneToolResultsImpl,
 } from "../compaction/sessionBind.js";
 import {
   type PersistHost,
@@ -266,6 +268,7 @@ import {
   buildSmallProvider,
   callTitleModel,
   deriveTitleFromText,
+  isWeakTitleSource,
   persistSessionCwd,
   sanitizeTitle,
   historyArchivePath,
@@ -401,6 +404,12 @@ export class Session {
   private mcpReady: Promise<McpManager | null> = Promise.resolve(null);
   private systemPromptCache: { staticPrefix: string; dynamicSuffix: string; full: string; stableContext?: string; volatileSuffix?: string } | null = null;
   private disposed = false;
+  /**
+   * Tool names already placed on the provider wire this session. In-memory
+   * only (empty on new/resume). Growth is monotonic so mode/lazy flips never
+   * shrink the tools prefix mid-session; execute-time mode deny still applies.
+   */
+  private advertisedToolNames: Set<string> = new Set();
  /** Current Collaboration mode (default "agent"). */
   private mode: AgentMode = "agent";
   /** When true, suggest_mode switches are applied without re-asking the user
@@ -442,6 +451,8 @@ export class Session {
    * events appended after it. Cleared on model switch / compaction boundary.
    */
   private contextAnchor: { input: number; eventCount: number } | null = null;
+  /** Frozen folded tool_result stubs (toolCallId → stub) for prompt-cache. */
+  private foldedToolResultStubs = new Map<string, string>();
  /** Set when the session was loaded with a stale in-flight status (the prior
  * run was interrupted by a crash/restart). Drives a one-shot recovery
  * instruction in the system prompt so the next turn resumes from the
@@ -917,12 +928,29 @@ export class Session {
  */
   getRuntime(): AgentRuntime {
     if (this.runtime) return this.runtime;
-    this.runtime = runtimeRegistry.resolve(this.runtimeName, {
-      cwd: this.cwd,
-      registerTool: (def) => this.registerPluginTool(def),
-      setContextTransform: (transform) => this.setPluginContextTransform(transform),
-      registerEventSink: (sink) => this.registerPluginEventSink(sink),
-    });
+    try {
+      this.runtime = runtimeRegistry.resolve(this.runtimeName, {
+        cwd: this.cwd,
+        registerTool: (def) => this.registerPluginTool(def),
+        setContextTransform: (transform) => this.setPluginContextTransform(transform),
+        registerEventSink: (sink) => this.registerPluginEventSink(sink),
+      });
+    } catch (err) {
+      // resolve() already falls back for create() failures; an unknown name
+      // still throws — pin the session to the default loop so later prompts
+      // do not keep failing on the same bad runtimeName.
+      if (this.runtimeName && this.runtimeName !== "default") {
+        this.runtimeName = undefined;
+        this.runtime = runtimeRegistry.resolve(undefined, {
+          cwd: this.cwd,
+          registerTool: (def) => this.registerPluginTool(def),
+          setContextTransform: (transform) => this.setPluginContextTransform(transform),
+          registerEventSink: (sink) => this.registerPluginEventSink(sink),
+        });
+      } else {
+        throw err;
+      }
+    }
     return this.runtime;
   }
 
@@ -957,6 +985,14 @@ export class Session {
 
   steer(text: string): void {
     steerMessage(this as unknown as SteerHost, text);
+  }
+
+  /** Write pending steers/follow-ups to the inbox sidecar (best-effort). */
+  persistInbox(): void {
+    void saveSessionInbox(this.id, {
+      steering: this.steeringQueue,
+      followUps: this.followUpQueue,
+    }).catch(() => undefined);
   }
 
   listFollowUps(): FollowUpItem[] {
@@ -1765,36 +1801,32 @@ export class Session {
     this.cacheWarmTimer.unref?.();
   }
 
+  private async maybePruneToolResults(): Promise<boolean> {
+    return sessionMaybePruneToolResultsImpl(this as unknown as CompactHost);
+  }
+
   private async maybeCompact(opts: { force?: boolean; focus?: string } = {}): Promise<void> {
     return sessionMaybeCompactImpl(this as unknown as CompactHost, opts);
   }
 
-  /** Re-attach the last 5 files the dropped turns had read or edited, so the
-   * model keeps the code it was working on after a fold. Budget: ≤5K tokens
-   * per file and ≤10% of the window in total (capped at 50K), so the restore
-   * cannot undo the compaction. Restored files count as freshly read for the
-   * read-before-edit guard. */
+  /** List (paths only) the last N files the dropped turns touched. Bodies are
+   * not re-embedded — the model re-reads the history archive on demand.
+   * `compactRestoreFiles: 0` disables the list. */
   private async restoreDroppedFiles(
     dropped: Event[],
     retained: Event[],
-    window: number,
+    _window: number,
   ): Promise<string> {
     const maxFiles = this.config.compactRestoreFiles ?? 5;
     if (maxFiles <= 0) return "";
     try {
       const paths = droppedFilePaths(dropped, retained, this.cwd);
       if (paths.length === 0) return "";
-      const { text, files } = await renderRestoredFiles(paths, {
+      const { text } = await renderRestoredFiles(paths, {
         cwd: this.cwd,
         maxFiles,
-        perFileTokens: 5_000,
-        totalTokens: Math.min(50_000, Math.floor(window * 0.1)),
-        estimateTokens,
         canRead: async (p) => (await assertPathAllowedAsync(p, "read", this.sandbox, this.cwd)).ok,
       });
-      for (const f of files) {
-        this.fileObservations.observe(f.path, { mtimeMs: f.mtimeMs, size: f.size }, f.hash);
-      }
       return text;
     } catch {
       return "";
@@ -1916,7 +1948,9 @@ export class Session {
  /** Produce a short title for the session. Tries the small model first,
  * then falls back to a deterministic prefix of the first user text. */
   private async refreshTitle(firstUserText: string): Promise<void> {
+    if (isWeakTitleSource(firstUserText)) return;
     const fallback = deriveTitleFromText(firstUserText);
+    if (!fallback || fallback === "(untitled)") return;
     let candidate: string | null = null;
     try {
       const provider = buildSmallProvider(this.config);
@@ -1925,7 +1959,9 @@ export class Session {
  /* ignore */
     }
     const title = sanitizeTitle(candidate ?? "") ?? sanitizeTitle(fallback) ?? fallback;
-    if (title) await this.setTitle(title);
+    if (title && title !== "(untitled)" && !isWeakTitleSource(title)) {
+      await this.setTitle(title);
+    }
   }
 
   async compact(focus?: string): Promise<void> {

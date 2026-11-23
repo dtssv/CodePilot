@@ -4,7 +4,13 @@
 
 import { z } from "zod";
 import type { ToolDef } from "./types.js";
-import { getJob, writeJobStdin, describeUnknownJob, type WriteJobStdinResult } from "./bashJobs.js";
+import {
+  getJob,
+  writeJobStdin,
+  describeUnknownJob,
+  assertJobOwner,
+  type WriteJobStdinResult,
+} from "./bashJobs.js";
 
 /** Turn a failed write into advice the model can act on. */
 function writeFailure(
@@ -52,8 +58,9 @@ const schema = z.object({
 export const writeStdinTool: ToolDef<typeof schema> = {
   name: "write_stdin",
   description:
-    "Write to stdin of a background `bash` job (`job_id`). Appends a newline " +
-    "unless `raw: true`. For one-shot commands use `bash`; for logs use `bash_output`.",
+    "Write to a background `bash` job's PTY/stdin (`job_id`). Appends a newline " +
+    "unless `raw: true`. Interactive flow: `bash(run_in_background: true)` then this. " +
+    "For logs use `bash_output`.",
   inputSchema: schema,
   permission: "execute",
   async execute(input, ctx) {
@@ -61,17 +68,8 @@ export const writeStdinTool: ToolDef<typeof schema> = {
     if (!job) {
       return { content: describeUnknownJob(ctx.cwd, input.job_id), isError: true };
     }
-    // Ownership guard: the bashJobs registry is keyed only by cwd, so parallel
-    // sub-agents sharing a parent cwd share a job table. Refuse to write to a
-    // job started by a different session; only enforced when both sides carry
-    // an identity.
-    if (job.meta.ownerSessionId && ctx.sessionId && job.meta.ownerSessionId !== ctx.sessionId) {
-      return {
-        content:
-          `job ${input.job_id} belongs to a different agent and cannot be written to from here`,
-        isError: true,
-      };
-    }
+    const ownerErr = assertJobOwner(job, ctx.sessionId);
+    if (ownerErr) return { content: ownerErr, isError: true };
     if (job.meta.status !== "running") {
       return {
         content: `job ${input.job_id} is not running (status: ${job.meta.status})`,
@@ -84,10 +82,13 @@ export const writeStdinTool: ToolDef<typeof schema> = {
     if (!write.ok) {
       return { content: writeFailure(input.job_id, write), isError: true };
     }
-    const sent = input.raw ? input.input : input.input + "\\n";
-    const preview = sent.length > 100 ? sent.slice(0, 100) + "…" : sent;
+    // Count UTF-8 bytes of what was actually written (real `\n`, not the escaped preview).
+    const payload = input.raw ? input.input : input.input + "\n";
+    const bytes = Buffer.byteLength(payload, "utf-8");
+    const previewSrc = input.raw ? input.input : input.input + "\\n";
+    const preview = previewSrc.length > 100 ? previewSrc.slice(0, 100) + "…" : previewSrc;
     return {
-      content: `wrote ${sent.length} byte(s) to stdin of job ${input.job_id}: ${JSON.stringify(preview)}`,
+      content: `wrote ${bytes} byte(s) to stdin of job ${input.job_id}: ${JSON.stringify(preview)}`,
     };
   },
 };

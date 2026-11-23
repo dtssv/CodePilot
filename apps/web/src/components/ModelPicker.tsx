@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from "react-dom";
 
 import type { Codepilot } from "../state/useCodepilot.js";
-import type { SelectableModelInfo } from "../protocol/client.js";
+import type { ModelCapabilities, SelectableModelInfo } from "../protocol/client.js";
 import { describeError } from "../protocol/client.js";
 import { loadReasoningEffort, saveReasoningEffort } from "../prefs.js";
 import {
@@ -10,6 +10,7 @@ import {
   reasoningEffortFromChoice,
   reasoningEffortToChoice,
   type ReasoningEffort,
+  type ReasoningEffortCaps,
   type ReasoningEffortChoice,
 } from "../reasoningEffort.js";
 import { t } from "../i18n.js";
@@ -32,6 +33,27 @@ function providerKind(label: string, providerId: string): string | undefined {
   return undefined;
 }
 
+function capsFor(
+  capsByKey: Record<string, ReasoningEffortCaps>,
+  providerId: string,
+  model: string,
+): ReasoningEffortCaps | undefined {
+  return capsByKey[`${providerId}::${model}`];
+}
+
+function effortChoices(
+  model: string,
+  providerLabel: string,
+  providerId: string,
+  capsByKey: Record<string, ReasoningEffortCaps>,
+): ReasoningEffortChoice[] {
+  return reasoningEffortChoicesForModel(
+    model,
+    providerKind(providerLabel, providerId),
+    capsFor(capsByKey, providerId, model),
+  );
+}
+
 /** Composer-adjacent picker: models grouped by provider + per-model thinking effort. */
 export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | null {
   const { state, client } = cp;
@@ -41,6 +63,7 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
   const [loadError, setLoadError] = useState<string | null>(null);
   const [pos, setPos] = useState<MenuPos | null>(null);
   const [effortByKey, setEffortByKey] = useState<Record<string, ReasoningEffortChoice>>({});
+  const [capsByKey, setCapsByKey] = useState<Record<string, ReasoningEffortCaps>>({});
   const btnRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -54,12 +77,18 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
       const snap = await client.getConfig(state.cwd || undefined);
       const list = snap.selectableModels.filter((m) => m.kind === "chat");
       setModels(list);
+      const nextCaps: Record<string, ReasoningEffortCaps> = {};
+      for (const m of list) {
+        const mc: ModelCapabilities | undefined =
+          snap.providers[m.providerId]?.modelCapabilities?.[m.model];
+        if (mc?.reasoningEffortChoices) {
+          nextCaps[modelKey(m)] = { reasoningEffortChoices: mc.reasoningEffortChoices };
+        }
+      }
+      setCapsByKey(nextCaps);
       const next: Record<string, ReasoningEffortChoice> = {};
       for (const m of list) {
-        const choices = reasoningEffortChoicesForModel(
-          m.model,
-          providerKind(m.providerLabel, m.providerId),
-        );
+        const choices = effortChoices(m.model, m.providerLabel, m.providerId, nextCaps);
         if (choices.length === 0) continue;
         const saved = loadReasoningEffort(m.model, m.providerId);
         const choice = reasoningEffortToChoice(saved);
@@ -77,6 +106,12 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    const open = (): void => setOpen(true);
+    window.addEventListener("codepilot:open-model-picker", open);
+    return () => window.removeEventListener("codepilot:open-model-picker", open);
+  }, []);
 
   useEffect(() => {
     if (open) void refresh();
@@ -165,14 +200,15 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
 
   if (state.connection !== "connected") return null;
 
+  const activeRow = models.find(
+    (m) => m.model === state.model && m.providerId === state.providerId,
+  );
   const activeChoices = state.model
-    ? reasoningEffortChoicesForModel(
+    ? effortChoices(
         state.model,
-        providerKind(
-          models.find((m) => m.model === state.model && m.providerId === state.providerId)
-            ?.providerLabel ?? "",
-          state.providerId ?? "",
-        ),
+        activeRow?.providerLabel ?? "",
+        state.providerId ?? "",
+        capsByKey,
       )
     : [];
   const activeEffort = state.model
@@ -180,10 +216,14 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
       reasoningEffortToChoice(loadReasoningEffort(state.model, state.providerId))
     : "off";
 
-  const label = state.model
+  // Trigger shows a short chip label; full provider · model · effort stays in title.
+  const fullLabel = state.model
     ? `${state.providerId ? `${state.providerId} · ` : ""}${state.model}${
         activeChoices.length > 0 ? ` · ${effortLabel(activeEffort)}` : ""
       }`
+    : t("Select model");
+  const label = state.model
+    ? `${state.model}${activeChoices.length > 0 ? ` · ${effortLabel(activeEffort)}` : ""}`
     : t("Select model");
 
   const apply = async (
@@ -191,10 +231,7 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
     choice: ReasoningEffortChoice | undefined,
   ): Promise<void> => {
     setOpen(false);
-    const choices = reasoningEffortChoicesForModel(
-      m.model,
-      providerKind(m.providerLabel, m.providerId),
-    );
+    const choices = effortChoices(m.model, m.providerLabel, m.providerId, capsByKey);
     let effort: ReasoningEffort | null | undefined;
     if (choices.length > 0) {
       const picked = choice ?? effortByKey[modelKey(m)] ?? choices[0]!;
@@ -236,10 +273,7 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
               const active =
                 m.model === state.model &&
                 (!state.providerId || m.providerId === state.providerId);
-              const choices = reasoningEffortChoicesForModel(
-                m.model,
-                providerKind(g.label, m.providerId),
-              );
+              const choices = effortChoices(m.model, g.label, m.providerId, capsByKey);
               const effort = effortByKey[modelKey(m)] ?? choices[0] ?? "off";
               return (
                 <div
@@ -299,14 +333,14 @@ export function ModelPicker({ cp }: { cp: Codepilot }): React.ReactElement | nul
       <button
         ref={btnRef}
         type="button"
-        className="flex min-w-0 max-w-full items-center gap-1 rounded-md px-1.5 py-0.5 text-left font-mono text-[11px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
+        className="flex h-7 max-w-full min-w-0 items-center gap-1 rounded-lg bg-[var(--color-surface-sunken)] px-2 text-left text-[11.5px] font-medium text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-ink)]"
         onClick={() => setOpen((v) => !v)}
-        title={t("Switch model")}
+        title={`${t("Switch model")}: ${fullLabel}`}
         aria-haspopup="listbox"
         aria-expanded={open}
       >
         <span className="min-w-0 truncate">{label}</span>
-        <ChevronIcon open={open} className="h-3 w-3 shrink-0 opacity-60" />
+        <ChevronIcon open={open} className="h-3 w-3 shrink-0 opacity-50" />
       </button>
       {menu}
     </>

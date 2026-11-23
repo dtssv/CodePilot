@@ -64,7 +64,11 @@ export async function handlePluginsInstall(p: {
   force?: boolean;
 }): Promise<{ name: string; path: string }> {
   if (!p?.source?.trim()) throw new RpcError(ErrorCode.InvalidParams, "source required");
-  const path = await installPlugin(p.source.trim(), { force: p.force === true });
+  const path = await installPlugin(p.source.trim(), {
+    force: p.force === true,
+    // RPC install is user-initiated after inspect/confirm in the UI.
+    consent: true,
+  });
   return { name: path.split(/[/\\]/).filter(Boolean).pop() ?? "plugin", path };
 }
 

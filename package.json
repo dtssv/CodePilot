@@ -16,7 +16,7 @@
     "dev:tui": "corepack pnpm --filter @codepilot/tui dev",
     "agent": "node packages/protocol/dist/cli.js agent",
     "desktop": "corepack pnpm --filter @codepilot/desktop start",
-    "package:vscode": "corepack pnpm --filter codepilot-vscode build && corepack pnpm --filter codepilot-vscode package",
+    "package:vscode": "corepack pnpm --filter @codepilot/web build && corepack pnpm --filter codepilot-vscode build && corepack pnpm --filter codepilot-vscode package",
     "package:idea": "cd apps/idea && ./gradlew buildPlugin",
     "package:npm": "corepack pnpm -C packages/core pack && corepack pnpm -C packages/protocol pack && corepack pnpm -C apps/tui pack",
     "package:cli": "node scripts/package/cli.mjs",

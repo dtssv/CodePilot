@@ -90,6 +90,8 @@ describe("webview html", () => {
     const nonce = /script-src 'nonce-([^']+)'/.exec(csp)?.[1];
     expect(nonce).toBeTruthy();
     expect(webview.html).toContain(`<script type="module" nonce="${nonce}">boot()</script>`);
+    expect(webview.html).toContain(`<script nonce="${nonce}">window.__codepilotHost=`);
+    expect(webview.html).toContain(`"view":"chat"`);
   });
 
   it("shows build instructions when the embed build is missing", () => {
@@ -100,6 +102,16 @@ describe("webview html", () => {
   it("injectCsp leaves `$` sequences in the page intact", () => {
     const out = injectCsp(`<head></head><script type="module">a.replace(/x/, "$&")</script>`, "src", "n");
     expect(out).toContain(`"$&"`);
+  });
+
+  it("injectCsp does not rewrite <script substrings inside the embed body", () => {
+    // The inlined web bundle can contain the text `<script` in string literals.
+    // A broad rewrite would corrupt JS; only the HTML module opener is tagged.
+    const body = `<head></head><script type="module">const s = "<script>evil</script>";</script>`;
+    const out = injectCsp(body, "src", "abc");
+    expect(out).toContain(`<script type="module" nonce="abc">`);
+    expect(out).toContain(`const s = "<script>evil</script>";`);
+    expect(out).not.toContain(`const s = "<script nonce=`);
   });
 });
 
@@ -163,6 +175,36 @@ describe("relay", () => {
       { type: "host/prompt", text: "explain", send: true },
       { type: "host/command", name: "mode", mode: "plan" },
     ]);
+  });
+
+  it("merges prefs/set and notifies the host callback", () => {
+    const engine = new FakeEngine();
+    const seen: unknown[] = [];
+    const store = new Map<string, unknown>();
+    const ctx = {
+      extensionUri: vscode.Uri.file(extensionDir(SHELL)),
+      globalState: {
+        get: (k: string) => store.get(k),
+        update: async (k: string, v: unknown) => {
+          store.set(k, v);
+        },
+      },
+    } as unknown as vscode.ExtensionContext;
+    const provider = new ChatViewProvider(ctx, {
+      engine: engine as unknown as Engine,
+      cwd: () => "/work",
+      folders: () => ["/work"],
+      onUiPrefs: (p) => seen.push(p),
+    });
+    const view = { webview: new FakeWebview() };
+    provider.resolveWebviewView(view as never);
+    view.webview.receive({ type: "prefs/set", prefs: { theme: "light", locale: "zh" } });
+    expect(seen).toEqual([{ theme: "light", locale: "zh" }]);
+    provider.applyUiPrefs({ theme: "light", locale: "zh" });
+    expect(view.webview.posted.at(-1)).toEqual({
+      type: "host/prefs",
+      prefs: { theme: "light", locale: "zh" },
+    });
   });
 });
 

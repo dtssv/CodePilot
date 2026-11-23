@@ -13,6 +13,13 @@ describe("applyEdit", () => {
     expect(r.message).toBe("hello there");
   });
 
+  it("rejects identical search/replace as a no-op", () => {
+    const r = applyEdit("hello world", { search: "hello", replace: "hello" });
+    expect(r.ok).toBe(false);
+    expect(r.strategy).toBe("validate");
+    expect(r.message).toMatch(/identical|no changes/i);
+  });
+
   it("ambiguous exact match without global_replace", () => {
     const r = applyEdit("foo foo foo", { search: "foo", replace: "bar" });
     expect(r.ok).toBe(false);
@@ -42,14 +49,16 @@ describe("applyEdit", () => {
     expect(r.strategy).toBe("exact");
   });
 
-  it("trimmed-lines strategy tolerates differing indent", () => {
+  it("trimmed-lines match is hint-only (does not write; indent-safe)", () => {
     const original = "function foo() {\n    return 1;\n}\n";
     const r = applyEdit(original, {
       search: "function foo() {\n  return 1;\n}",
       replace: "function foo() {\n  return 2;\n}",
     });
-    expect(r.ok).toBe(true);
-    expect(["trimmed-lines", "exact"]).toContain(r.strategy);
+    expect(r.ok).toBe(false);
+    expect(r.strategy).toBe("trimmed-lines");
+    expect(r.message).toMatch(/not applied|exact indentation/i);
+    expect(original).toContain("return 1");
   });
 
   it("single-line unique match", () => {
@@ -134,6 +143,55 @@ describe("applyEdit", () => {
     const r = applyEdit("hello", { search: "zzz", replace: "y" });
     expect(r.ok).toBe(false);
     expect(r.strategy).toBe("none");
+    expect(r.message).toMatch(/not found/i);
+  });
+
+  it("rejects empty search (does not match a blank line)", () => {
+    const r = applyEdit("a\n\nb\n", { search: "", replace: "X" });
+    expect(r.ok).toBe(false);
+    expect(r.strategy).toBe("validate");
+    expect(r.message).toMatch(/empty/i);
+  });
+
+  it("returns invalid regex instead of throwing", () => {
+    const r = applyEdit("hello", { search: "(", replace: "x", regex: true });
+    expect(r.ok).toBe(false);
+    expect(r.strategy).toBe("regex");
+    expect(r.message).toMatch(/invalid regex/i);
+  });
+
+  it("includes a closest snippet when search is missing", () => {
+    const original = "alpha\nhello world\nomega\n";
+    const r = applyEdit(original, { search: "hello wrld", replace: "hi" });
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/closest match/i);
+    expect(r.message).toContain("hello world");
+  });
+
+  it("hints when replace text is already present", () => {
+    const r = applyEdit("hello there\n", { search: "hello wrld", replace: "hello there" });
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/already be applied/i);
+  });
+
+  it("exact edit keeps untouched mixed line endings", () => {
+    // Line 1 CRLF, line 2 LF, line 3 CRLF — only middle line changes.
+    const original = "keep-a\r\nchange-me\nkeep-c\r\n";
+    const r = applyEdit(original, { search: "change-me", replace: "changed" });
+    expect(r.ok).toBe(true);
+    expect(r.strategy).toBe("exact");
+    expect(r.message).toBe("keep-a\r\nchanged\nkeep-c\r\n");
+  });
+
+  it("LF search matches a CRLF file without rewriting other endings", () => {
+    const original = "alpha\r\nbeta\r\ngamma\r\n";
+    const r = applyEdit(original, {
+      search: "alpha\nbeta",
+      replace: "alpha\nBETA",
+    });
+    expect(r.ok).toBe(true);
+    expect(r.message.startsWith("alpha\r\nBETA")).toBe(true);
+    expect(r.message.endsWith("gamma\r\n") || r.message.includes("gamma\r\n")).toBe(true);
   });
 });
 
@@ -155,6 +213,45 @@ describe("editFileTool (integration with disk)", () => {
     const r = await editFileTool.execute({ path: file, search: "world", replace: "there" }, ctx);
     expect(r.isError).toBeFalsy();
     expect(readFileSync(file, "utf-8")).toBe("hello there\n");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("schema rejects empty search instead of matching a blank line", () => {
+    const parsed = editFileTool.inputSchema.safeParse({
+      path: "f.txt",
+      search: "",
+      replace: "X",
+    });
+    expect(parsed.success).toBe(false);
+  });
+
+  it("rejects overlapping multi-edits against the original", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "edit-"));
+    const file = join(dir, "f.txt");
+    writeFileSync(file, "hello world\n", "utf-8");
+    const ctx = {
+      cwd: dir,
+      signal: undefined,
+      async artifact() {
+        return "art_x";
+      },
+      async readArtifact() {
+        return "";
+      },
+    };
+    const r = await editFileTool.execute(
+      {
+        path: file,
+        edits: [
+          { search: "hello world", replace: "A" },
+          { search: "world", replace: "B" },
+        ],
+      },
+      ctx,
+    );
+    expect(r.isError).toBe(true);
+    expect(r.content).toMatch(/overlap/i);
+    expect(readFileSync(file, "utf-8")).toBe("hello world\n");
     rmSync(dir, { recursive: true, force: true });
   });
 

@@ -17,9 +17,12 @@ import React from "react";
 import { App as AppUI } from "./ui/App.js";
 import { TrustPrompt } from "./ui/TrustPrompt.js";
 import { installStderrCapture } from "./stderrCapture.js";
+import { MOUSE_OFF, MOUSE_ON, createMouseStdin } from "./ui/mouse.js";
+import { createCaretStdout } from "./ui/caret.js";
 import { createGoalBridge, createPermissionBridge, createQuestionBridge } from "./ui/controller.js";
 import { createMockSession } from "./dev/mockSession.js";
 import { runHeadless, parseOutputFormat } from "./headless.js";
+import { installProcessGuards } from "@codepilot/core";
 import { runProtocolCli } from "@codepilot/protocol/cli";
 import {
   CLI_COMMANDS,
@@ -27,6 +30,9 @@ import {
   parseArgs,
   parseConfigPatch,
 } from "./cliArgs.js";
+import { VERSION } from "./version.js";
+
+installProcessGuards();
 
 export { type ParsedArgs, parseArgs, parseConfigPatch };
 
@@ -42,7 +48,7 @@ Options:
   --yolo                     Start in yolo permission mode (auto-approve all)
   --mode <chat|plan|agent>   Start in a Collaboration mode
                                chat  — read-only Q&A (no edits, no shell)
-                               plan  — read-only + plan_update; produces a plan
+                               plan  — read-only + plan; produces a plan
                                agent — full autonomy (default)
   --resume <id>              Resume an existing session
   --mock                     Use an in-memory mock session (no core needed; for UI dev)
@@ -66,6 +72,31 @@ Subcommands:
                              ~/.codepilot/config.json and the resources to
                              ~/.codepilot/{commands,agents,skills}/.
 
+  Engine & serving (handled by the protocol CLI; see "codepilot <cmd> --help"):
+  serve                      JSON-RPC over stdio.
+  serve --web [--port N]     WebSocket + SPA on loopback (default port 18765).
+  serve --daemon [--port N]  Shared local daemon; exits after 30s idle.
+  web [--port N]             Open the web UI in a browser (same as serve --web).
+  acp [--cwd D]              Agent Client Protocol over stdio, for editors.
+  connect [HOST:PORT]        Attach the terminal to a running "serve" session.
+
+  One-shot runs:
+  run "<task>"               Run one task headlessly.
+                               --model M --provider P --cwd D --yolo
+                               --permission-mode ask|auto-edit|yolo|auto|dont-ask
+                               --output-format text|json|stream-json
+                               --allowed-tools a,b --max-turns N --json --quiet
+  goal "<objective>"         Run a multi-round goal.
+                               --max-rounds N --max-stalls N
+  agent [DIR]                Open the task-oriented agent app window for DIR.
+
+  Manage:
+  config show|providers|add|remove|use|templates
+                             Manage ~/.codepilot/config.json providers.
+  export [session-id]        Export a transcript (default: newest session).
+                               --format md|jsonl -o PATH
+  update [--check]           Update in place from GitHub Releases.
+
   Headless / print mode (for scripts & CI):
   -p, --print                Run a single prompt to completion and exit.
                              No interactive UI. Requires a prompt (positional
@@ -81,6 +112,7 @@ Subcommands:
   --max-turns <N>            Maximum number of agent turns (default: 50)
 
   -h, --help                 Show this help
+  -v, --version              Print the version and exit
 
 If positional arguments are provided, they are joined and submitted as the
 first prompt once the UI is ready (or as the sole prompt in --print mode).
@@ -253,6 +285,10 @@ async function main(): Promise<void> {
   const args = parseArgs(rawArgv);
   if (args.showHelp) {
     process.stdout.write(HELP);
+    return;
+  }
+  if (args.showVersion) {
+    process.stdout.write(`codepilot ${VERSION}\n`);
     return;
   }
 
@@ -563,6 +599,13 @@ async function main(): Promise<void> {
         };
 
   const restoreStderr = installStderrCapture();
+ // Mouse reports are consumed before Ink sees them (`stdin` is our filtered
+ // stream); the App subscribes to the parsed events for click hit-testing.
+  const mouse = process.stdin.isTTY ? createMouseStdin(process.stdin) : undefined;
+ // The prompt declares its caret cell; this stream parks the terminal cursor
+ // there after each frame so IME preedit is drawn inside the input, not at the
+ // bottom-left of the screen.
+  const caret = process.stdout.isTTY ? createCaretStdout(process.stdout) : undefined;
   const instance = render(
     React.createElement(AppUI, {
       session,
@@ -577,10 +620,15 @@ async function main(): Promise<void> {
       initialPrompt: args.prompt,
       connection,
     }),
+    { ...(mouse ? { stdin: mouse.stdin } : {}), ...(caret ? { stdout: caret.stdout } : {}) },
   );
+  if (mouse) process.stdout.write(MOUSE_ON);
 
  // Graceful shutdown: dispose session and unmount Ink on signals.
   const cleanup = async (): Promise<void> => {
+    if (mouse) process.stdout.write(MOUSE_OFF);
+    caret?.dispose();
+    mouse?.dispose();
     instance.unmount();
     restoreStderr();
     try {
@@ -594,6 +642,11 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void cleanup());
 
   await instance.waitUntilExit();
+  caret?.dispose();
+  if (mouse) {
+    process.stdout.write(MOUSE_OFF);
+    mouse.dispose();
+  }
   restoreStderr();
   try {
     await session.dispose();

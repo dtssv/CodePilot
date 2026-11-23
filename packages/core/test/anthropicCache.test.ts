@@ -294,6 +294,51 @@ describe("AnthropicProvider budgeted breakpoint placement", () => {
   });
 });
 
+describe("AnthropicProvider runtime_context cache stability", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("does not merge runtime into preceding tool_results (cross-turn prefix stable)", async () => {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(init.body as string);
+      return sseResponse(MINIMAL_STREAM);
+    });
+    const p = new AnthropicProvider({ apiKey: "k" });
+    await drain(
+      p.stream({
+        model: "claude-sonnet-4-5",
+        systemPrompt: "sys",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "do it" }] },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "c1", name: "bash", input: { command: "ls" } }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", toolCallId: "c1", content: "ok\n", isError: false }],
+          },
+          // Trailing harness note — must not rewrite the tool_results user turn.
+          {
+            role: "system",
+            content: [{ type: "text", text: "<runtime_context>\nnow: T1\n</runtime_context>" }],
+          },
+        ],
+        tools: TOOLS,
+      }),
+    );
+    const msgs = body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
+    const lastUser = [...msgs].reverse().find((m) => m.role === "user");
+    expect(lastUser).toBeDefined();
+    expect(JSON.stringify(lastUser!.content)).toContain("tool_result");
+    expect(JSON.stringify(lastUser!.content)).not.toContain("<runtime_context>");
+    const sys = body.system as Array<{ text?: string; cache_control?: unknown }>;
+    const runtime = sys[sys.length - 1]!;
+    expect(runtime.text).toContain("<runtime_context>");
+    expect(runtime.cache_control).toBeUndefined();
+  });
+});
+
 describe("AnthropicProvider countTokens", () => {
   afterEach(() => vi.restoreAllMocks());
 

@@ -86,10 +86,12 @@ describe("runAgent steering attribution", () => {
       },
     );
     const userMsgs = emitted.filter(
-      (e) => e.type === "message" && e.role === "user" &&
+      (e): e is Extract<Event, { type: "message" }> =>
+        e.type === "message" && e.role === "user" &&
         e.content.some((c) => c.type === "text" && c.text.includes("edge case")),
     );
     expect(userMsgs).toHaveLength(1);
+    expect(userMsgs[0]?.steer).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
 

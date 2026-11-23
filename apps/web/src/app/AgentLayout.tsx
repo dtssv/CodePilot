@@ -16,6 +16,8 @@ import {
 import { AgentHome, FilePreview, TaskPanel } from "../components/AgentView.js";
 import { parseReference } from "../state/paths.js";
 import type { Row } from "../state/rows.js";
+import { FeatureDialogHost } from "../components/FeatureDialog.js";
+import { FeatureMenu } from "../components/FeatureMenu.js";
 import { SettingsPanel } from "../components/SettingsPanel.js";
 import {
   CodeIcon,
@@ -38,7 +40,11 @@ export function AgentLayout({
   setDraft,
   theme,
   toggleTheme,
+  themePreference,
   setThemePersist,
+  setLocalePersist,
+  panelPosition,
+  setPanelPosition,
   themeName,
   setThemeNamePersist,
   layout,
@@ -62,7 +68,27 @@ export function AgentLayout({
 
   // The first-run guide can request the Settings panel via a window event.
   useEffect(() => {
-    const open = (): void => setShowSettings(true);
+    const open = (ev: Event): void => {
+      const section = (ev as CustomEvent<{ section?: string }>).detail?.section;
+      if (
+        section === "connectors" ||
+        section === "custom-mcp" ||
+        section === "skills" ||
+        section === "remote" ||
+        section === "schedule"
+      ) {
+        window.dispatchEvent(
+          new CustomEvent("codepilot:open-feature", { detail: { section } }),
+        );
+        return;
+      }
+      setShowSettings(true);
+      if (section) {
+        requestAnimationFrame(() =>
+          window.dispatchEvent(new CustomEvent("codepilot:settings-nav", { detail: { section } })),
+        );
+      }
+    };
     window.addEventListener("codepilot:open-settings", open);
     return () => window.removeEventListener("codepilot:open-settings", open);
   }, []);
@@ -82,7 +108,7 @@ export function AgentLayout({
         defaultUrl={surface.autoConnect?.url ?? prefs.url}
         defaultToken={prefs.token || surface.autoConnect?.token || ""}
         onConnect={(o) => void cp.connect(o)}
-        topRight={<ThemeToggle theme={theme} onToggle={toggleTheme} />}
+        topRight={<ThemeToggle theme={theme} preference={themePreference} onToggle={toggleTheme} />}
       />
     );
   }
@@ -129,6 +155,7 @@ export function AgentLayout({
         emptyText={t("No tasks yet.")}
         sessionIcon={<RocketIcon className="h-3.5 w-3.5" />}
         canOpenNewWorkspace={canPickWorkspace}
+        primaryNav={!remote ? <FeatureMenu disabled={!connected} /> : undefined}
         onOpenWorkspace={(ws) => void cp.openWorkspace(ws)}
         onCloseWorkspace={(ws) => void cp.closeWorkspace(ws)}
         onOpenNewWorkspace={() => void openNewWorkspace()}
@@ -159,7 +186,7 @@ export function AgentLayout({
               <CodeIcon className="h-4 w-4" />
             </button>
           )}
-          <ThemeToggle theme={theme} onToggle={toggleTheme} />
+          <ThemeToggle theme={theme} preference={themePreference} onToggle={toggleTheme} />
         </div>
       </div>
     </>
@@ -239,6 +266,13 @@ export function AgentLayout({
                   onAnswer={(a) => void cp.answerQuestion(a)}
                   onRetry={() => void cp.retryLast()}
                   onOpenPath={(p) => setPreview(parseReference(p).path)}
+                  onAddToChat={(text) => {
+                    const quote = text
+                      .split("\n")
+                      .map((l) => `> ${l}`)
+                      .join("\n");
+                    setDraft(draft.trim() ? `${draft.trim()}\n\n${quote}` : quote);
+                  }}
                 />
               </div>
             </div>
@@ -296,16 +330,34 @@ export function AgentLayout({
           cp={cp}
           open={showSettings}
           onClose={() => setShowSettings(false)}
-          theme={theme}
+          themePreference={themePreference}
           onTheme={setThemePersist}
           themeName={themeName}
           onThemeName={setThemeNamePersist}
+          onLocale={setLocalePersist}
+          panelPosition={panelPosition}
+          onPanelPosition={setPanelPosition}
           layout={layout}
           onLayout={switchLayout}
           onComposePrompt={(text) => {
             setDraft(text);
             setShowSettings(false);
           }}
+        />
+      )}
+      {!remote && (
+        <FeatureDialogHost
+          cp={cp}
+          themePreference={themePreference}
+          onTheme={setThemePersist}
+          themeName={themeName}
+          onThemeName={setThemeNamePersist}
+          onLocale={setLocalePersist}
+          panelPosition={panelPosition}
+          onPanelPosition={setPanelPosition}
+          layout={layout}
+          onLayout={switchLayout}
+          onComposePrompt={(text) => setDraft(text)}
         />
       )}
     </div>

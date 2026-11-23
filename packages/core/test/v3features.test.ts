@@ -14,8 +14,10 @@ const collect = async (it: AsyncIterable<StreamEvent>): Promise<StreamEvent[]> =
 };
 import { FallbackProvider, isFailoverError } from "../src/providers/fallback.js";
 import { HookEngine } from "../src/hooks/hooks.js";
-import { askUserQuestionTool, planDoneTool } from "../src/tools/ask_user.js";
+import { askUserQuestionTool } from "../src/tools/ask_user.js";
+import { planTool } from "../src/tools/plan.js";
 import { taskTool } from "../src/tools/task.js";
+import { zodToJsonSchema } from "../src/tools/types.js";
 import type { ChatProvider, StreamEvent } from "../src/providers/types.js";
 import type { ToolContext } from "../src/tools/types.js";
 import { resolveSandbox } from "../src/sandbox/sandbox.js";
@@ -324,7 +326,7 @@ describe("HookEngine", () => {
   });
 });
 
-describe("ask_user_question / plan_done", () => {
+describe("ask_user_question / plan action=done", () => {
   const ctx = (askUser?: ToolContext["askUser"]): ToolContext => ({
     cwd: "/tmp",
     artifact: async () => "art_x",
@@ -354,8 +356,32 @@ describe("ask_user_question / plan_done", () => {
     expect(r.content).toContain("Q (q1): scope?\nA: A");
   });
 
-  it("plan_done emits the exit_plan_mode signal on approval", async () => {
-    const r = await planDoneTool.execute({}, ctx(async () => ({ approve: "Approve" })));
+  it("plan omits action → preprocess fills update (legacy plan_update shape)", async () => {
+    const parsed = planTool.inputSchema.safeParse({
+      steps: [{ title: "do x", status: "in_progress" }],
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.action).toBe("update");
+    const r = await planTool.execute(parsed.data, ctx());
+    expect(r.isError).toBeFalsy();
+    expect(r.content).toContain("plan updated: 1");
+  });
+
+  it("plan JSON schema keeps action required (nudges the model)", () => {
+    const j = zodToJsonSchema(planTool.inputSchema) as {
+      required?: string[];
+      properties: { action?: { default?: unknown } };
+    };
+    expect(j.required).toContain("action");
+    expect(j.properties.action?.default).toBeUndefined();
+  });
+
+  it("plan action=done emits the exit_plan_mode signal on approval", async () => {
+    const r = await planTool.execute(
+      { action: "done" },
+      ctx(async () => ({ approve: "Approve" })),
+    );
     expect(r.content).toContain("approved");
     const sig = JSON.parse(r.blocks![0]!.text) as {
       type: string;
@@ -365,8 +391,11 @@ describe("ask_user_question / plan_done", () => {
     expect(sig.approved).toBe(true);
   });
 
-  it("plan_done stays in plan mode on rejection", async () => {
-    const r = await planDoneTool.execute({}, ctx(async () => ({ approve: "Revise" })));
+  it("plan action=done stays in plan mode on rejection", async () => {
+    const r = await planTool.execute(
+      { action: "done" },
+      ctx(async () => ({ approve: "Revise" })),
+    );
     expect(r.content).toContain("NOT approved");
   });
 });

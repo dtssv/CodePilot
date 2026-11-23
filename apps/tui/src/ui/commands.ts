@@ -33,6 +33,7 @@ export type CommandResult =
   | { kind: "resume"; sessionId: string }
   | { kind: "clear" }
   | { kind: "exit" }
+  | { kind: "help"; text: string }
   | { kind: "show-plan" }
   | { kind: "compact"; focus?: string }
   | { kind: "retry" }
@@ -58,6 +59,9 @@ export type CommandResult =
       model?: string;
       allowedTools?: string[];
       commandName: string;
+      /** Present when the command expands via MCP prompts/get. */
+      mcpPrompt?: { server: string; name: string };
+      args?: string;
     }
   | { kind: "unknown-command"; name: string };
 
@@ -80,6 +84,8 @@ export interface CommandInfo {
 // listed here falls back to the shared catalog's description.
 const TUI_DESCRIPTIONS: Readonly<Record<string, string>> = {
   model: "Pick a model (↑↓ + Enter)",
+  chat: "Switch to chat mode (read-only Q&A)",
+  plan: "Show the current plan for this session",
   provider: "Pick a provider preset (↑↓ + Enter)",
   mode: "Pick permission mode (↑↓ + Enter)",
   agent: "Pick collaboration mode (↑↓ + Enter)",
@@ -106,43 +112,72 @@ const AGENT_MODES: readonly AgentMode[] = ["chat", "plan", "agent"];
 const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "auto-edit", "yolo", "auto", "dont-ask"];
 const PRESET_NAMES: readonly PermissionPresetName[] = ["safe", "standard", "full-access", "supervised-auto"];
 
-export const HELP_TEXT = `Available commands:
-  /help                              Show this help
-  /setup                             First-run guide: provider · search · images
-  /connect                           Add a provider (interactive wizard)
-  /model                             Pick a model (↑↓ + Enter)
-  /provider                          Pick a provider (↑↓ + Enter)
-  /mode                              Pick permission mode (↑↓ + Enter)
-  /agent                             Pick collaboration mode (↑↓ + Enter)
-       chat   read-only Q&A; no edits, no shell
-       plan   read-only + plan_update; model produces a plan
-       agent  full autonomy (default)
+// Help sections are the only hand-written part left: they decide grouping and
+// ordering. The commands themselves, their argument hints and descriptions come
+// from the same catalog the palette uses, so a command cannot be listed here and
+// missing there. Anything the catalog gains without a section appears under
+// "Other" rather than silently dropping out of the help.
+const HELP_SECTIONS: readonly { title: string; names: readonly string[] }[] = [
+  { title: "Model & mode", names: ["model", "provider", "agent", "chat", "plan", "mode", "preset", "theme", "vim"] },
+  { title: "Conversation", names: ["compact", "retry", "rewind", "undo", "redo", "clear"] },
+  { title: "Sessions & goals", names: ["sessions", "resume", "goal", "schedule"] },
+  { title: "Project & context", names: ["init", "export", "gc-artifacts", "mcp", "hooks", "agents", "skills", "context", "plugins"] },
+  { title: "Terminal", names: ["setup", "connect", "web", "remote", "help", "exit"] },
+];
 
-  /theme                             Pick a colour palette (↑↓ + Enter)
+function commandLabel(c: CommandInfo): string {
+  return c.args ? `/${c.name} ${c.args}` : `/${c.name}`;
+}
 
-  /plan                              Show the current plan
-  /compact                           Trigger compaction
-  /resume · /sessions                Pick a session to resume (↑↓ + Enter)
-  /goal                              Prompt for a long-running objective
-  /clear                             Clear the visible event log
+export interface HelpSection {
+  title: string;
+  items: readonly CommandInfo[];
+}
 
-  -- runtime introspection --
-  /mcp  /hooks  /agents  /skills  /context  /plugins
-  /export [md|jsonl] [path]          Export this session transcript
-  /undo · /redo                      Undo/redo last agent file edits
-  /init [--force]                    Scaffold AGENTS.md (commit-ready)
-  /web                               Open the web UI in your browser (same session)
-  /remote                            One-time QR for phone remote control
-  /schedule                          List idle/scheduled tasks
+/**
+ * The command catalog grouped for display. `renderHelpText` and the help panel
+ * both read this, so a command can never be listed in one and missing in the
+ * other.
+ */
+export function helpSections(commands: readonly CommandInfo[] = COMMANDS): HelpSection[] {
+  const byName = new Map(commands.map((c) => [c.name, c]));
+  const sections: HelpSection[] = [];
+  const placed = new Set<string>();
+  for (const section of HELP_SECTIONS) {
+    const items = section.names
+      .map((name) => byName.get(name))
+      .filter((c): c is CommandInfo => c !== undefined);
+    for (const c of items) placed.add(c.name);
+    if (items.length > 0) sections.push({ title: section.title, items });
+  }
+  const rest = commands.filter((c) => !placed.has(c.name));
+  if (rest.length > 0) sections.push({ title: "Other", items: rest });
+  return sections;
+}
 
-  /exit                              Exit CodePilot
+export function renderHelpText(commands: readonly CommandInfo[] = COMMANDS): string {
+  const sections = helpSections(commands);
 
-  Tip: selection commands accept an optional arg to skip the picker
-  (e.g. /model provider/model, /mode yolo).
+  // One shared label column keeps every section aligned.
+  let labelWidth = 0;
+  for (const section of sections) {
+    for (const c of section.items) labelWidth = Math.max(labelWidth, commandLabel(c).length);
+  }
 
-  -- custom commands (.codepilot/commands/*.md) --
-  /<name>                            Run a custom prompt template
-`;
+  const out: string[] = ["Available commands — optional arguments are shown in [ ].", ""];
+  for (const section of sections) {
+    out.push(section.title);
+    for (const c of section.items) out.push(`  ${commandLabel(c).padEnd(labelWidth)}  ${c.description}`);
+    out.push("");
+  }
+  out.push("Tips");
+  out.push("  · Selection commands take an argument to skip the picker: /mode yolo, /agent plan, /theme nord");
+  out.push("  · Markdown commands in .codepilot/commands/*.md run as /<name> and are not listed above");
+  out.push("  · /? is an alias for /help, /quit for /exit");
+  return out.join("\n");
+}
+
+export const HELP_TEXT = renderHelpText();
 
 export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
   const trimmed = raw.trim();
@@ -158,7 +193,7 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       return { kind: "noop" };
     case "help":
     case "?":
-      return { kind: "system", text: HELP_TEXT };
+      return { kind: "help", text: HELP_TEXT };
     case "connect":
       return { kind: "connect" };
     case "setup":
@@ -185,6 +220,8 @@ export function runCommand(raw: string, _ctx: CommandContext): CommandResult {
       }
       return { kind: "set-preset", name: rest as PermissionPresetName };
     }
+    case "chat":
+      return { kind: "set-agent-mode", mode: "chat" };
     case "agent": {
       if (rest === "") return { kind: "pick-agent" };
       if (!AGENT_MODES.includes(rest as AgentMode)) {
@@ -296,6 +333,9 @@ export function runCommandWithCustom(
       model: resolved.command.model,
       allowedTools: resolved.command.allowedTools,
       commandName: resolved.command.name,
+      ...(resolved.command.mcpPrompt
+        ? { mcpPrompt: resolved.command.mcpPrompt, args: resolved.args }
+        : {}),
     };
   }
   if (resolved.reason === "not-a-command") {

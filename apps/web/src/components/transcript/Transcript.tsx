@@ -13,11 +13,13 @@ import {
   MessageView,
   MiscRow,
   ReasoningBlock,
+  SteerChip,
   ThinkingRow,
 } from "./MessageViews.js";
 import { PermissionCard } from "./PermissionCard.js";
 import { PlanCard, PlanMarker } from "./Plan.js";
 import { QuestionCard } from "./QuestionCard.js";
+import { SelectionActions } from "./SelectionActions.js";
 import { StepGroup, subagentTag } from "./Steps.js";
 import type { Density, SubagentNav, TranscriptProps } from "./types.js";
 
@@ -131,10 +133,12 @@ function MainTranscript({
   onDecide,
   onAnswer,
   onRetry,
+  onAddToChat,
 }: TranscriptProps): React.ReactElement {
   // Grouping is O(rows); memoize so it only recomputes when the rows array
   // identity changes, not on every status/activity re-render during streaming.
   const blocks = useMemo(() => groupRows(rows), [rows]);
+  const rootRef = useRef<HTMLDivElement>(null);
   const busy = status !== "idle";
   const last = blocks[blocks.length - 1];
   const lastTurn = last?.kind === "assistant_turn" ? last : undefined;
@@ -152,7 +156,7 @@ function MainTranscript({
   const canRetry = !busy && endsInError(rows);
 
   return (
-    <div className={`flex flex-col ${density === "compact" ? "gap-3" : "gap-4"}`}>
+    <div ref={rootRef} className={`relative flex flex-col ${density === "compact" ? "gap-3" : "gap-4"}`}>
       {blocks.map((b, i) => (
         <BlockView
           key={b.key}
@@ -169,6 +173,7 @@ function MainTranscript({
       {status === "compacting" && <ThinkingRow label={t("Compacting context")} />}
       {permission && <PermissionCard req={permission} onDecide={onDecide} />}
       {question && <QuestionCard req={question} onAnswer={onAnswer} />}
+      <SelectionActions rootRef={rootRef} onAddToChat={onAddToChat} />
     </div>
   );
 }
@@ -252,6 +257,8 @@ function AssistantTurnView({
                   )}
                 </div>
               );
+            case "steer":
+              return <SteerChip key={`steer-${p.msg.id}`} text={p.msg.text} density={density} />;
             case "steps":
               return <StepGroup key={`s-${p.tools[0]?.id ?? i}`} tools={p.tools} live={live} />;
             case "plan":

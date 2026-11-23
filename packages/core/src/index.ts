@@ -96,7 +96,7 @@ export {
   webFetchTool,
   webSearchTool,
   askUserQuestionTool,
-  planDoneTool,
+  planTool,
   readFileTool,
   writeFileTool,
   editFileTool,
@@ -104,7 +104,7 @@ export {
   globTool,
   grepTool,
   lsTool,
-  planUpdateTool,
+  goalTool,
   memoryWriteTool,
   readArtifactTool,
   taskTool,
@@ -251,15 +251,25 @@ export {
   compact,
   shouldCompact,
   foldToolResults,
+  DEFAULT_MAX_TOOL_RESULTS_IN_CONTEXT,
+  planToolResultPrune,
+  applyToolResultPruneOverlays,
+  DEFAULT_PRUNE_TRIGGER_CHARS,
   trimEventsToBudget,
   buildLocalHandoffSummary,
   estimateEventTokens,
   extractPlan,
+  TOOL_INPUT_SPILL_CHARS,
+  truncateToolCallInput,
+  spillToolCallInputForContext,
 } from "./compaction/compaction.js";
 export type {
   CompactionOptions,
   CompactionResult,
   CompactionDecision,
+  PrunePlan,
+  ToolResultFold,
+  SpillToolCallInputResult,
 } from "./compaction/compaction.js";
 
 // ---- MCP ----
@@ -277,15 +287,11 @@ export {
   reasoningEffortFromChoice,
   reasoningEffortToChoice,
 } from "./config/reasoningEffort.js";
-export type { ReasoningEffort, ReasoningEffortChoice } from "./config/reasoningEffort.js";
-export {
-  MODEL_CATALOG,
-  lookupModelCatalog,
-  catalogEffortChoices,
-  catalogModalities,
-  catalogSuggestedSmall,
-} from "./config/modelCatalog.js";
-export type { ModelCatalogEntry } from "./config/modelCatalog.js";
+export type {
+  ReasoningEffort,
+  ReasoningEffortCaps,
+  ReasoningEffortChoice,
+} from "./config/reasoningEffort.js";
 export { formatUploadNote, materializeUploads } from "./workspace/promptFiles.js";
 
 // ---- Agent runtime (pluggable loop) ----
@@ -606,7 +612,22 @@ export type {
 // Note: McpStdioClient, McpManager, mcpToolName, parseMcpToolName,
 // McpToolDescriptor, McpInvokeRequest, McpInvokeResult are already
 // exported above in the legacy "MCP" block.
-export { McpSseClient, isMcpSseConfig, mcpResourceToolName, MCP_REF_REGEX, parseMcpReference, resolveMcpReferences } from "./mcp/mcp.js";
+export {
+  McpSseClient,
+  isMcpSseConfig,
+  mcpResourceToolName,
+  mcpPromptCommandName,
+  mcpPromptCommandNamePrefixed,
+  parseMcpPromptCommandName,
+  listMcpPromptSlashCommands,
+  expandMcpPromptCommand,
+  mcpPromptToSlashCommand,
+  formatPromptResult,
+  formatResourceReadResult,
+  MCP_REF_REGEX,
+  parseMcpReference,
+  resolveMcpReferences,
+} from "./mcp/mcp.js";
 export type {
   McpResourceDescriptor,
   McpResourceReadResult,
@@ -879,6 +900,7 @@ export {
   runUpdateCheck,
   startSelfUpdateWatcher,
 } from "./config/selfUpdate.js";
+export { installProcessGuards } from "./processGuards.js";
 export type {
   EngineUpdateInfo,
   SelfUpdateOptions,
@@ -959,7 +981,12 @@ export type { SessionEventSink, BoundedSinkQueueOptions } from "./session/sessio
 export { BUILTIN_COMMANDS, sharedBuiltinCommands } from "./skills/builtinCommands.js";
 export type { BuiltinCommand, BuiltinCommandScope, CommandKind } from "./skills/builtinCommands.js";
 export { FileObservationStore, hashFileContent } from "./workspace/fsObservation.js";
-export type { FileObservation, FreshnessResult, CheckFreshOptions } from "./workspace/fsObservation.js";
+export type {
+  FileObservation,
+  FreshnessResult,
+  CheckFreshOptions,
+  ReadWindow,
+} from "./workspace/fsObservation.js";
 
 // ---- Keyless transcript replay (test mode, no API key needed) ----
 export { ReplayProvider, extractReplayTurns } from "./agent/replayProvider.js";

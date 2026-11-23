@@ -57,12 +57,13 @@ describe("streaming messages", () => {
     expect(state.model).toBe("claude-sonnet-4-5");
   });
 
-  it("applies model switch events with providerId", () => {
+  it("applies model switch events with providerId without a toast", () => {
     const state = drive([
       { type: "model", model: "qwen-plus", providerId: "tongyi" },
     ]);
     expect(state.model).toBe("qwen-plus");
     expect(state.providerId).toBe("tongyi");
+    expect(state.notice).toBeUndefined();
   });
 
   it("ignores tool-input JSON deltas, which are internal", () => {
@@ -641,11 +642,13 @@ describe("follow-up queue events", () => {
           role: "assistant",
           content: [{ type: "text", text: "reply later" }],
         },
+        { type: "usage", usage: { input: 100, output: 10, cacheRead: 50 } },
       ],
       historyBefore: 2,
     });
     expect(s.historyBefore).toBe(2);
     expect(messages(s).map((m) => m.msg.text)).toEqual(["later", "reply later"]);
+    expect(s.usage).toEqual({ input: 100, output: 10, cacheRead: 50 });
 
     s = reducer(s, {
       type: "history-prepend",
@@ -657,6 +660,7 @@ describe("follow-up queue events", () => {
           role: "assistant",
           content: [{ type: "text", text: "reply earlier" }],
         },
+        { type: "usage", usage: { input: 200, output: 20, cacheRead: 80 } },
       ],
       historyTruncated: false,
     });
@@ -667,5 +671,7 @@ describe("follow-up queue events", () => {
       "later",
       "reply later",
     ]);
+    // Prefix usage must merge into the resume-tail totals (not stay on the tail alone).
+    expect(s.usage).toEqual({ input: 300, output: 30, cacheRead: 130 });
   });
 });

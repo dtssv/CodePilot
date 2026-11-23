@@ -1,8 +1,8 @@
 // ls: list a directory (one level deep, with type markers).
 
 import { z } from "zod";
-import { readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { readdir } from "node:fs/promises";
+import { resolve } from "node:path";
 import type { ToolDef } from "./types.js";
 import { guardPath } from "./_shared.js";
 
@@ -24,7 +24,7 @@ const schema = z.object({
 export const lsTool: ToolDef<typeof schema> = {
   name: "ls",
   description:
-    "List one directory level (`d name/`, `- file`). Use `glob` for recursive trees.",
+    "List one directory level (`d name/`, `- file`, `@` symlink). Use `glob` for recursive trees.",
   inputSchema: schema,
   permission: "read",
   async execute(input, ctx) {
@@ -39,26 +39,41 @@ export const lsTool: ToolDef<typeof schema> = {
     } catch (err) {
       return { content: `cannot read ${dir}: ${(err as Error).message}`, isError: true };
     }
-    const sorted = entries
+    const BYTE_BUDGET = 32 * 1024;
+    const filtered = entries
       .filter((e) => showHidden || !e.name.startsWith("."))
       .sort((a, b) => {
         if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      })
-      .slice(0, max);
+        return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+      });
     const lines: string[] = [];
-    for (const e of sorted) {
+    let used = 0;
+    let truncatedByBytes = false;
+    for (const e of filtered.slice(0, max)) {
+      const kind = e.isSymbolicLink() ? "l" : e.isDirectory() ? "d" : "-";
       let suffix = "";
-      try {
-        const s = await stat(join(dir, e.name));
-        if (e.isDirectory()) suffix = "/";
-        else if (s.isSymbolicLink()) suffix = "@";
-        else if (e.name.endsWith(".sock")) suffix = "=";
-      } catch {
- /* ignore */
+      if (e.isSymbolicLink()) suffix = "@";
+      else if (e.isDirectory()) suffix = "/";
+      else if (e.name.endsWith(".sock")) suffix = "=";
+      const line = `${kind} ${e.name}${suffix}`;
+      const add = Buffer.byteLength(line, "utf-8") + (lines.length > 0 ? 1 : 0);
+      if (used + add > BYTE_BUDGET) {
+        truncatedByBytes = true;
+        break;
       }
-      lines.push(`${e.isDirectory() ? "d" : "-"} ${e.name}${suffix}`);
+      lines.push(line);
+      used += add;
     }
-    return { content: lines.join("\n") || "(empty)" };
+    const body = lines.join("\n") || "(empty)";
+    const notes: string[] = [];
+    if (filtered.length > max) {
+      notes.push(`[truncated at ${max} entries; ${filtered.length - max} more not shown]`);
+    }
+    if (truncatedByBytes) {
+      notes.push(`[truncated at ${BYTE_BUDGET} byte budget]`);
+    }
+    return {
+      content: notes.length > 0 ? `${body}\n\n${notes.join("\n")}` : body,
+    };
   },
 };

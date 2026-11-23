@@ -1,12 +1,19 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { PermissionEngine, matchRule } from "../src/permissions/permissions.js";
 import { ToolRegistry } from "../src/tools/types.js";
 import { z } from "zod";
 import type { ToolDef } from "../src/tools/types.js";
-import { readFileTool, bashTool, writeFileTool, bashKillTool } from "../src/tools/index.js";
+import {
+  readFileTool,
+  bashTool,
+  writeFileTool,
+  bashKillTool,
+  editFileTool,
+  applyPatchTool,
+} from "../src/tools/index.js";
 import { resolveSandbox } from "../src/sandbox/sandbox.js";
 
 function makeTool(name: string, perm: "read" | "write" | "execute" | "network"): ToolDef {
@@ -239,6 +246,23 @@ describe("PermissionEngine", () => {
     }
   });
 
+  it("Always allow on an escalation grants matching later escalations this session", () => {
+    const e = new PermissionEngine({ permissionMode: "ask", permissions: { allow: ["bash"] } });
+    const t = makeTool("bash", "execute");
+    const input = { command: "npm run dev", escalate_sandbox: true, justification: "needs net" };
+    expect(e.preflight(t, input)).toBe("ask");
+    const rule = PermissionEngine.suggestRule(t, input);
+    e.addSessionEscalationRule(rule);
+    // Matching escalated call is allowed; a normal allow rule alone would not.
+    const ok = e.preflight(t, { command: "npm run dev --watch", escalate_sandbox: true });
+    expect(typeof ok === "object" && ok.decision).toBe("allow");
+    // A different command pattern still asks.
+    expect(e.preflight(t, { command: "curl https://example.com", escalate_sandbox: true })).toBe("ask");
+    // Ordinary session allow still does not cover escalations.
+    e.addSessionRule("bash(curl *)", "allow");
+    expect(e.preflight(t, { command: "curl https://example.com", escalate_sandbox: true })).toBe("ask");
+  });
+
   it("a deny rule still wins over a sandbox escalation", () => {
     const e = new PermissionEngine({ permissionMode: "yolo", permissions: { deny: ["bash"] } });
     const t = makeTool("bash", "execute");
@@ -257,6 +281,7 @@ describe("PermissionEngine", () => {
     expect(req.reason).toMatch(/SANDBOX ESCALATION/);
     expect(req.reason).toMatch(/WITHOUT the OS sandbox/);
     expect(req.reason).toMatch(/dev server needs the network/);
+    expect(req.sandboxEscalation).toBe(true);
   });
 });
 
@@ -409,6 +434,69 @@ describe("PermissionEngine with real built-in tools", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("enrichForDisplay attaches a live-disk edit preview", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "perm-edit-"));
+    try {
+      await writeFile(join(dir, "a.ts"), "const x = 1;\nconst y = 2;\n", "utf-8");
+      const e = new PermissionEngine({ permissionMode: "ask" });
+      const req = e.buildRequest("r1", editFileTool, {
+        path: "a.ts",
+        search: "const x = 1;",
+        replace: "const x = 42;",
+      });
+      await e.enrichForDisplay(req, dir);
+      expect(req.preview).toBeTruthy();
+      expect(req.preview).toContain("--- a/a.ts");
+      expect(req.preview).toContain("-const x = 1;");
+      expect(req.preview).toContain("+const x = 42;");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("enrichForDisplay reports when an edit would miss on live disk", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "perm-miss-"));
+    try {
+      await writeFile(join(dir, "a.ts"), "hello\n", "utf-8");
+      const e = new PermissionEngine({ permissionMode: "ask" });
+      const req = e.buildRequest("r1", editFileTool, {
+        path: "a.ts",
+        search: "nope",
+        replace: "yep",
+      });
+      await e.enrichForDisplay(req, dir);
+      expect(req.preview).toMatch(/Would fail on live disk/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("enrichForDisplay previews write_file overwrite as a diff", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "perm-write-"));
+    try {
+      await writeFile(join(dir, "a.txt"), "old\n", "utf-8");
+      const e = new PermissionEngine({ permissionMode: "ask" });
+      const req = e.buildRequest("r1", writeFileTool, {
+        path: "a.txt",
+        content: "new\n",
+      });
+      await e.enrichForDisplay(req, dir);
+      expect(req.preview).toContain("-old");
+      expect(req.preview).toContain("+new");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("enrichForDisplay surfaces apply_patch body as preview", async () => {
+    const e = new PermissionEngine({ permissionMode: "ask" });
+    const patch = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch\n";
+    const req = e.buildRequest("r1", applyPatchTool, { patch });
+    await e.enrichForDisplay(req, process.cwd());
+    expect(req.preview).toContain("*** Begin Patch");
+    expect(req.reason).toMatch(/Apply patch to 1 file/);
   });
 });
 

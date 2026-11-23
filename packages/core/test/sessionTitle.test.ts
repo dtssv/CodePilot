@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { sanitizeTitle, deriveTitleFromText } from "../src/session/session-utils.js";
+import {
+  sanitizeTitle,
+  deriveTitleFromText,
+  isWeakTitleSource,
+  firstTitleWorthyUserText,
+} from "../src/session/session-utils.js";
+import type { Event } from "../src/types.js";
 
 describe("sanitizeTitle", () => {
   it("strips closed think blocks and keeps the answer", () => {
@@ -50,5 +56,32 @@ describe("deriveTitleFromText", () => {
 
   it("drops tool-call markup from the deterministic fallback", () => {
     expect(deriveTitleFromText("修复标题生成</arg_value> bug")).toBe("修复标题生成 bug");
+  });
+
+  it("does not title a session from a continue nudge", () => {
+    expect(isWeakTitleSource("继续")).toBe(true);
+    expect(isWeakTitleSource("continue")).toBe(true);
+    expect(deriveTitleFromText("继续")).toBe("(untitled)");
+    expect(sanitizeTitle("继续")).toBeNull();
+  });
+
+  it("picks the first non-weak user prompt for titling", () => {
+    const events: Event[] = [
+      {
+        type: "message",
+        id: "u0",
+        role: "user",
+        content: [{ type: "text", text: "继续" }],
+      },
+      {
+        type: "message",
+        id: "u1",
+        role: "user",
+        content: [{ type: "text", text: "帮我根据本项目的实现写一个ppt文档" }],
+      },
+    ];
+    // First message is weak — skip to the real ask. (Typical order is real
+    // ask first; this still covers resume-edge ordering.)
+    expect(firstTitleWorthyUserText(events)).toBe("帮我根据本项目的实现写一个ppt文档");
   });
 });

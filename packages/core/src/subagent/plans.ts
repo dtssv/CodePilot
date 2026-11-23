@@ -79,7 +79,7 @@ export async function writePlanFile(
   lines.push("");
   lines.push("## Steps");
   if (steps.length === 0) {
-    lines.push("_(no steps recorded — call `plan_update` before `plan_done`)_");
+    lines.push("_(no steps recorded — call `plan` with action=update before action=done)_");
   } else {
     for (const s of steps) {
       const mark =

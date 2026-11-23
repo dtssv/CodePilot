@@ -67,6 +67,8 @@ export interface SlashCommandHost {
   setShowModelPicker: (show: boolean) => void;
   setSelectOverlay: (overlay: SelectOverlayState | null) => void;
   setTextOverlay: (overlay: TextOverlayState | null) => void;
+  /** Open the full-screen help panel (/help). */
+  setShowHelp: (show: boolean) => void;
   setHistoryEpoch: React.Dispatch<React.SetStateAction<number>>;
   setExitPending: (pending: boolean) => void;
   setController: React.Dispatch<React.SetStateAction<SessionController>>;
@@ -94,6 +96,9 @@ export async function executeSlashCommand(
             case "system":
               host.dispatch({ type: "set-notice", text: result.text });
               return { kind: "done" };
+            case "help":
+              host.setShowHelp(true);
+              return { kind: "done" };
             case "unknown-command":
               host.dispatch({ type: "set-notice", text: `Unknown command: /${result.name}. Try /help.` });
               return { kind: "done" };
@@ -103,8 +108,33 @@ export async function executeSlashCommand(
    // A custom slash command: send the rendered prompt to the
    // host.session. Apply optional model + allowed-tools overrides for
    // this turn only (turn-scoped override semantics — the host.session clears
-   // them in prompt's finally block).
+   // them in prompt's finally block). MCP prompt commands expand via
+   // prompts/get before the turn.
               try {
+                let promptText = result.prompt;
+                if (result.mcpPrompt) {
+                  const { expandMcpPromptCommand } = await import("@codepilot/core");
+                  const mcp = host.session.getMcpManager();
+                  if (!mcp) {
+                    host.dispatch({
+                      type: "set-notice",
+                      text: `MCP not ready — cannot expand /${result.commandName}`,
+                    });
+                    return { kind: "done" };
+                  }
+                  promptText = await expandMcpPromptCommand(
+                    {
+                      name: result.commandName,
+                      description: "",
+                      path: "",
+                      source: "mcp",
+                      body: "",
+                      mcpPrompt: result.mcpPrompt,
+                    },
+                    result.args ?? "",
+                    mcp,
+                  );
+                }
                 if (result.model || result.allowedTools) {
                   host.session.setTurnOverrides({
                     model: result.model,
@@ -125,7 +155,7 @@ export async function executeSlashCommand(
                   type: "set-notice",
                   text: `/${result.commandName}${overrideNote}`,
                 });
-                await host.session.prompt(result.prompt);
+                await host.session.prompt(promptText);
               } catch (err: unknown) {
                 host.dispatch({
                   type: "set-notice",
@@ -255,7 +285,7 @@ export async function executeSlashCommand(
                 current: host.state.agentMode,
                 options: [
                   { value: "chat", label: "chat", description: "read-only Q&A" },
-                  { value: "plan", label: "plan", description: "read + plan_update" },
+                  { value: "plan", label: "plan", description: "read + plan" },
                   { value: "agent", label: "agent", description: "full autonomy" },
                 ],
                 onPick: (mode) => {
@@ -328,13 +358,14 @@ export async function executeSlashCommand(
                 host.dispatch({ type: "set-notice", text: "Nothing to retry yet." });
                 return { kind: "done" };
               }
-              // Prefer resuming the last turn from the breakpoint (no new user
-              // message): the agent re-engages where it stopped. Only fall back
-              // to re-sending the prompt when there is nothing to resume.
+              // Prefer resume (no new user bubble). Never fall back to re-sending
+              // when the transcript still ends in an error — that duplicates the
+              // user message (same bug the web Retry path had).
               const s = host.session as {
                 canResumeLastTurn?: () => boolean;
                 resumeLastTurn?: () => Promise<"started" | "queued" | "noop">;
               };
+              const tail = host.state.rows[host.state.rows.length - 1];
               if (
                 typeof s.resumeLastTurn === "function" &&
                 (typeof s.canResumeLastTurn !== "function" || s.canResumeLastTurn())
@@ -345,8 +376,19 @@ export async function executeSlashCommand(
                   const r = await s.resumeLastTurn();
                   if (r !== "noop") return { kind: "done" };
                 } catch {
-                  /* fall back to resend */
+                  host.dispatch({
+                    type: "set-notice",
+                    text: "Could not resume the last turn.",
+                  });
+                  return { kind: "done" };
                 }
+              }
+              if (tail?.kind === "error") {
+                host.dispatch({
+                  type: "set-notice",
+                  text: "Resume unavailable for this error. Send a new message to continue.",
+                });
+                return { kind: "done" };
               }
               return { kind: "prompt", text: last.text };
             }

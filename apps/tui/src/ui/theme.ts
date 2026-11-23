@@ -71,8 +71,8 @@ const CATEGORY_BY_NAME: Record<string, ToolCategory> = {
   web_fetch: "web", fetch: "web", web_search: "web",
   task: "task", spawn_agent: "task", team: "task", skill: "task",
   memory_write: "memory", remember: "memory", memory: "memory",
-  plan_update: "plan", todo_write: "plan", update_plan: "plan",
-  ask_user_question: "ask", plan_done: "ask",
+  plan: "plan", todo_write: "plan", update_plan: "plan",
+  ask_user_question: "ask", goal: "task",
 };
 
 export function toolCategory(name: string): ToolCategory {

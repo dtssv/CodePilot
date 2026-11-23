@@ -28,6 +28,7 @@ import { type DedupCache } from "../agent/doomLoop.js";
 import { type FileObservationStore } from "../workspace/fsObservation.js";
 import { type ChatProvider } from "../providers/types.js";
 import type { CacheTurn } from "../compaction/cacheStats.js";
+import { firstTitleWorthyUserText, isWeakTitleSource } from "./sessionTitle.js";
 import { startPromptSpan, endPromptSpan, type PromptSpan } from "./session-telemetry.js";
 import { resolveSessionMcpReferences } from "../mcp/sessionBind.js";
 import {
@@ -88,11 +89,13 @@ export type PromptHost = {
   turnCounter: number;
   turnOverrideModel: string | null;
   events: Event[];
+  persisted: Event[];
   hooks: HookEngine;
   mcp: McpManager | null;
   mcpReady: Promise<McpManager | null>;
   deliveryRoots: string[];
   toolRegistry: ToolRegistry;
+  advertisedToolNames: Set<string>;
   artifacts: ArtifactStore;
   permissions: PermissionEngine;
   sandbox: ResolvedSandbox;
@@ -101,6 +104,7 @@ export type PromptHost = {
   cancelController: AbortController | null;
   steerController: AbortController | null;
   steeringQueue: SteeringItem[];
+  persistInbox(): void;
   turnPreImages: Map<string, Buffer | null>;
   pendingWritePaths: Map<string, string[]>;
   turnBaseTree: string | null;
@@ -119,6 +123,7 @@ export type PromptHost = {
   redactPatterns: readonly import("../permissions/redact.js").RedactionPattern[];
   pendingRelevantMemories: string | null;
   lastProviderInputTokens: number;
+  foldedToolResultStubs: Map<string, string>;
   contextAnchor: { input: number; eventCount: number } | null;
   usageTotal: { input: number; output: number; cacheRead: number; cacheWrite: number };
   cacheTurns: CacheTurn[];
@@ -152,6 +157,7 @@ export type PromptHost = {
   onPermissionRequestWithBatch(req: PermissionRequest): Promise<PermissionResolution>;
   getPermissionClassifier(): PermissionClassifier;
   setAgentMode(mode: AgentMode): Promise<void>;
+  maybePruneToolResults(): Promise<boolean>;
   maybeCompact(opts?: { force?: boolean; focus?: string }): Promise<void>;
   refreshTitle(firstUserText: string): Promise<void>;
   maybeCheckpoint(): Promise<void>;
@@ -195,9 +201,23 @@ export function sessionCanResumeLastTurn(host: PromptHost): boolean {
   for (const e of host.events) if (e.type === "message" && e.role === "user") sawUser = true;
   if (!sawUser) return false;
   // Walk back past transient/bookkeeping events to the last meaningful one.
+  // Keep aligned with the web UI `endsInError` skip set (and skip `model` /
+  // `request`). A post-error model sync otherwise makes resume report noop
+  // while Retry is shown, so the client re-sends a user bubble.
   for (let i = host.events.length - 1; i >= 0; i--) {
     const e = host.events[i]!;
-    if (e.type === "status" || e.type === "usage" || e.type === "activity") continue;
+    if (
+      e.type === "status" ||
+      e.type === "usage" ||
+      e.type === "activity" ||
+      e.type === "mode" ||
+      e.type === "model" ||
+      e.type === "request" ||
+      e.type === "doom_loop" ||
+      e.type === "pin"
+    ) {
+      continue;
+    }
     return e.type === "error";
   }
   return false;
@@ -299,9 +319,11 @@ export async function sessionPrompt(host: PromptHost,
     });
   }
 
-  if (!resume) {
- // Wait for background MCP (if still starting) so tools / @mcp refs work.
+  // Wait for background MCP even on resume so meta-tool list / calls see
+  // a live registry (skipping left "No MCP tools are available.").
   await host.mcpReady.catch(() => null);
+
+  if (!resume) {
  // Resolve `@mcp:<server>/<uri>` references into inline resource content.
  // This lets users paste MCP resource URIs into their prompt to inject
  // server-side context (e.g. `@mcp:github/repos/foo/bar`).
@@ -395,11 +417,9 @@ export async function sessionPrompt(host: PromptHost,
     host.events.push(claimStatus);
     await host.persistEvent(claimStatus).catch(() => undefined);
     host.notify(claimStatus);
- // Lazily start the persistent shell (one per session). Its cwd/env
- // persist across foreground bash calls so `cd` / `export` carry over.
-    if (!host.persistentShell) {
-      host.persistentShell = host.startPersistentShell();
-    }
+ // Persistent shell is not started here: foreground `bash` uses a dedicated
+ // child so timeout can detach into bashJobs. Starting a unused shell would
+ // waste a process per session. Infrastructure remains for a future consumer.
  // Apply turn-scoped overrides.
  // The model override applies to THIS prompt only; allowed-tools rules
  // were already pushed onto the permission engine by setTurnOverrides
@@ -427,6 +447,7 @@ export async function sessionPrompt(host: PromptHost,
         host.providerOverride ??
         buildProvider({ ...host.config, model: effectiveModel }),
       tools: host.toolRegistry,
+      advertisedToolNames: host.advertisedToolNames,
       artifacts: host.artifacts,
       permissions: host.permissions,
       config: { ...host.config, model: effectiveModel },
@@ -444,9 +465,8 @@ export async function sessionPrompt(host: PromptHost,
       projectStateDir: projectStatePath(host.cwd),
       addDeliveryRoot: (dir) => host.addDeliveryRoot(dir),
       hooks: host.hooks,
-      // Live handle — expandWritablePath may close+replace the shell
-      // mid-turn; do not capture the instance by value.
-      persistentShell: host.livePersistentShellHandle(),
+      // Not passed: no tool currently reads ctx.persistentShell (bash uses a
+      // dedicated child). Keep AgentDeps.persistentShell optional for later.
       diagnosticsProvider: host.diagnosticsProviderChain(),
       postWrite: host.postWrite,
       redactPatterns: host.redactPatterns,
@@ -470,6 +490,7 @@ export async function sessionPrompt(host: PromptHost,
           const q = host.steeringQueue;
           host.steeringQueue = [];
           rotate();
+          host.persistInbox();
           return q;
         }
         // scope === "steer": take steer-delivery items + all system notices;
@@ -482,6 +503,7 @@ export async function sessionPrompt(host: PromptHost,
         }
         host.steeringQueue = keep;
         rotate();
+        host.persistInbox();
         return take;
       },
       peekSteering: () =>
@@ -631,8 +653,14 @@ export async function sessionPrompt(host: PromptHost,
         if (host.events === before) return null;
         return host.events.slice();
       },
+      pruneNow: async () => {
+        const pruned = await host.maybePruneToolResults();
+        if (!pruned) return null;
+        return host.events.slice();
+      },
       onWarmableRequest: (candidate) => host.scheduleCacheWarm(candidate),
       lastProviderInputTokens: host.lastProviderInputTokens,
+      foldedToolResultStubs: host.foldedToolResultStubs,
     };
 
     // Stop-hook continue loop: when a Stop hook blocks ending the turn,
@@ -706,9 +734,21 @@ export async function sessionPrompt(host: PromptHost,
       host.resumedFromInterrupt = false;
 
       if (host.title == null && stopContinueCount === 0) {
-        await host.refreshTitle(effectivePrompt);
+        // Always title from the first real user prompt in the transcript —
+        // never the current nudge ("继续" / "ok"), which used to overwrite
+        // the sidebar when the first turn never got a title (or resume lost it).
+        const source =
+          firstTitleWorthyUserText(host.persisted) ??
+          firstTitleWorthyUserText(host.events) ??
+          effectivePrompt;
+        if (!isWeakTitleSource(source)) {
+          await host.refreshTitle(source);
+        }
       }
 
+      // Prune old tool bodies first (durable micro-fold). Skips when a
+      // summary compaction is about to drop the same region.
+      await host.maybePruneToolResults().catch(() => false);
       await host.maybeCompact();
       // End-of-turn: refresh plan / sandbox notes / permission tail only.
       // Full rebuild would re-snapshot git+memory and bust the cached prefix

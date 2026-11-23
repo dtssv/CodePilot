@@ -67,6 +67,33 @@ export function mcpResourceToolName(server: string, resource: string): string {
   return `mcp__${server}__resource__${resource}`;
 }
 
+/** Slash-command name for an MCP prompt: `mcp__<server>__<prompt>`. */
+export function mcpPromptCommandName(server: string, prompt: string): string {
+  return `mcp__${server}__${prompt}`;
+}
+
+/**
+ * Prefixed slash name used when `mcp__<server>__<prompt>` collides with an
+ * existing markdown/builtin command.
+ */
+export function mcpPromptCommandNamePrefixed(server: string, prompt: string): string {
+  return `mcp__${server}__prompt__${prompt}`;
+}
+
+/** Parse `mcp__<server>__<prompt>` or the collision-prefixed form. */
+export function parseMcpPromptCommandName(
+  name: string,
+): { server: string; prompt: string } | null {
+  if (!name.startsWith("mcp__")) return null;
+  const rest = name.slice(5);
+  const parts = rest.split("__");
+  if (parts.length < 2) return null;
+  if (parts.length >= 3 && parts[1] === "prompt") {
+    return { server: parts[0]!, prompt: parts.slice(2).join("__") };
+  }
+  return { server: parts[0]!, prompt: parts.slice(1).join("__") };
+}
+
 /** Parse an `mcp__<server>__<tool>` or `mcp__<server>__resource__<name>`
  * name back into its parts. Returns `null` for anything that does not look
  * like a tool name we generate. */

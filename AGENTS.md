@@ -65,7 +65,9 @@ Node `>=20`. Package manager: `corepack pnpm` (see root `packageManager`).
 - **Sub-agent tool sets are a curated registry** (explore = read + research;
   worker = that plus write/execute) — not an open plugin free-for-all.
 - **Prompt cache:** keep a stable prefix for providers with implicit caching;
-  Anthropic uses explicit cache-control breakpoints.
+  Anthropic uses explicit cache-control breakpoints. Do not rewrite already-sent
+  tool_result bodies mid-run by default (truncate/spill before first send);
+  mid-history prune/fold is opt-in because it busts the cached prefix.
 
 ## Commands
 

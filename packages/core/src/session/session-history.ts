@@ -34,6 +34,7 @@ export type HistoryHost = {
   workspaceTracker: WorkspaceTracker | null | undefined;
   lastProviderInputTokens: number;
   contextAnchor: { input: number; eventCount: number } | null;
+  foldedToolResultStubs: Map<string, string>;
   persistEvent(e: Event): Promise<void>;
   notify(e: Event): void;
   isBusy(): boolean;
@@ -236,6 +237,7 @@ export async function rewindConversation(
   host.events = liveTranscript(host.persisted);
   host.lastProviderInputTokens = 0;
   host.contextAnchor = null;
+  host.foldedToolResultStubs.clear();
   host.notify(marker);
   return {
     messageId: target.messageId,

@@ -1,12 +1,13 @@
 /**
  * Settings sub-sections: 连接器 · 自定义连接器 · 技能 · 远程 · 定时 · 通用
  */
+import type { Locale } from "../../i18n.js";
 import type { Codepilot } from "../../state/useCodepilot.js";
-import type { Layout, Theme, ThemeName } from "../../surface.js";
+import type { Layout, ThemeName, ThemePreference } from "../../surface.js";
 import { CustomMcpPanel } from "../CustomMcpModal.js";
 import { PluginsPanel } from "../PluginsPanel.js";
 import { ConnectorsSection } from "./ConnectorsSection.js";
-import { GeneralSection } from "./GeneralSection.js";
+import { GeneralSection, type PanelPosition } from "./GeneralSection.js";
 import { RemoteSection } from "./RemoteSection.js";
 import { ScheduleSection } from "./ScheduleSection.js";
 import { SkillsSection } from "./SkillsSection.js";
@@ -19,20 +20,26 @@ export function SettingsExtras({
   cp,
   section,
   onComposePrompt,
-  theme,
+  themePreference,
   onTheme,
   themeName,
   onThemeName,
+  onLocale,
+  panelPosition,
+  onPanelPosition,
   layout,
   onLayout,
 }: {
   cp: Codepilot;
   section: SettingsExtraSection;
   onComposePrompt?: (text: string) => void;
-  theme: Theme;
-  onTheme(theme: Theme): void;
+  themePreference: ThemePreference;
+  onTheme(theme: ThemePreference): void;
   themeName: ThemeName;
   onThemeName(name: ThemeName): void;
+  onLocale(locale: Locale): void;
+  panelPosition?: PanelPosition;
+  onPanelPosition?(position: PanelPosition): void;
   layout: Layout;
   onLayout(layout: Layout): void;
 }): React.ReactElement {
@@ -122,10 +129,13 @@ export function SettingsExtras({
         <GeneralSection
           cp={cp}
           state={extras.state}
-          theme={theme}
+          themePreference={themePreference}
           onTheme={onTheme}
           themeName={themeName}
           onThemeName={onThemeName}
+          onLocale={onLocale}
+          panelPosition={panelPosition}
+          onPanelPosition={onPanelPosition}
           layout={layout}
           onLayout={onLayout}
           permissionMode={extras.permissionMode}

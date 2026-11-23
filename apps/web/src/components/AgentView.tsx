@@ -175,7 +175,7 @@ export function TaskPanel({
             <SpinnerIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-accent)]" />
             <span className="shrink-0 text-[var(--color-ink-dim)]">{t(toolVerb(activity.name, activity.input))}</span>
             <span className="min-w-0 truncate font-mono text-[11.5px] text-[var(--color-ink)]">
-              {toolTarget(activity.input)}
+              {toolTarget(activity.input, activity.name)}
             </span>
           </div>
         ) : (

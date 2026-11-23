@@ -5,6 +5,7 @@ import type { z } from "zod";
 import { zodToJsonSchema as zodToJsonSchemaLib } from "zod-to-json-schema";
 import type { ContentBlock, QuestionRequest, QuestionAnswers } from "../types.js";
 import type { ResolvedSandbox } from "../sandbox/sandbox.js";
+import { invalidateProviderToolDef } from "./schemaCacheMemo.js";
 
 export type PermissionLevel = "read" | "write" | "execute" | "network";
 
@@ -35,6 +36,8 @@ export interface ToolContext {
  * Persistent shell for foreground `bash` calls, so `cd`, `export`, and
  * background jobs persist across calls. Absent in test harnesses.
  */
+  /** Reserved — no built-in tool reads this today (bash uses a dedicated child
+   * so timeout can detach). Session may still own a PersistentShell for future use. */
   persistentShell?: { run(command: string, opts: { timeout?: number; signal?: AbortSignal }): Promise<import("../sandbox/persistentShell.js").PersistentShellResult> };
  /**
  * LSP / language-server diagnostics provider (host-supplied). When
@@ -91,7 +94,14 @@ export interface ToolContext {
     absPath: string,
     stat: { mtimeMs: number; size: number },
     contentHash?: string,
+    readWindow?: import("../workspace/fsObservation.js").ReadWindow,
   ) => void;
+  /** True when `read_file` can skip re-reading (same path+window, still fresh). */
+  isUnchangedRead?: (
+    absPath: string,
+    window: import("../workspace/fsObservation.js").ReadWindow,
+    currentStat: { mtimeMs: number; size: number },
+  ) => boolean;
   checkFileFresh?: (
     absPath: string,
     currentStat: { mtimeMs: number; size: number } | null,
@@ -106,6 +116,14 @@ export interface ToolContext {
   /** Run after a successful write: configured formatters, then new
    * language-server errors. Returns a note for the tool result ("" if none). */
   postWrite?: import("../workspace/postWrite.js").PostWrite;
+  /** Nested runner for `code_mode.tools.call`. Set by the agent loop → full
+   * permission + hooks path. Absent in tests → direct execute after mode check. */
+  callDeferredTool?: (
+    name: string,
+    args: Record<string, unknown>,
+  ) => Promise<ToolResult>;
+  /** Collaboration mode for nested deferred calls / mode deny. */
+  agentMode?: import("../types.js").AgentMode;
 }
 
 export interface ToolResult {
@@ -129,12 +147,15 @@ export interface ToolDef<S extends z.ZodTypeAny = z.ZodTypeAny> {
   inputSchema: S;
   permission: PermissionLevel;
   execute(input: z.infer<S>, ctx: ToolContext): Promise<ToolResult>;
-    /**
-   * Origin of the tool: "mcp" (external MCP server; hidden from the provider
-   * tool list under lazy discovery, reached via the `mcp` meta-tool), "plugin"
-   * (contributed via `RuntimeToolkit`), or undefined = built-in.
+  /**
+   * When set, overrides the permission-level parallel rule for this call.
+   * Return true only when the call is safe to run concurrently with other
+   * tools in the same turn. Fail-closed: throw/undefined → exclusive.
+   * Default (omit): `read` / `network` parallelize; `write` / `execute` do not.
    */
-  source?: "mcp" | "plugin";
+  concurrencySafe?(input: z.infer<S>): boolean;
+  /** Origin of the tool. Builtins omit this (treated as builtin for cache sort). */
+  source?: "builtin" | "mcp" | "plugin";
   /** For `source: "mcp"`: the server + original tool name + raw JSON schema,
    * used by the `mcp` meta-tool to describe/call it on demand. `destructiveHint`
    * is the server's SELF-REPORTED "this may perform destructive updates" flag;
@@ -205,10 +226,13 @@ export class ToolRegistry {
   }
 
  /** Remove a tool by name. Returns true if it was present. Used when an MCP
-  * server announces a tool-list change and its old tools must be dropped
-  * before the new set is re-registered. */
+   * server announces a tool-list change and its old tools must be dropped
+   * before the new set is re-registered. Also drops the provider-schema memo
+   * so a re-register does not reuse a stale compacted schema. */
   unregister(name: string): boolean {
-    return this.tools.delete(name);
+    const gone = this.tools.delete(name);
+    if (gone) invalidateProviderToolDef(name);
+    return gone;
   }
 
   get(name: string): ToolDef | undefined {

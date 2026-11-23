@@ -1,7 +1,12 @@
 import { z } from "zod";
 import type { ToolDef } from "../types.js";
 import { sanitizeUntrustedMcpText } from "../../mcp/mcpResultSanitize.js";
-import { resolveSearchBackend, resolveSearchLocale } from "./backend.js";
+import {
+  isRetriableSearchError,
+  listAutoSearchBackends,
+  resolveSearchLocale,
+  type ResolvedSearchBackend,
+} from "./backend.js";
 import { filterSearchHitsByDomain, formatSearchResultsForModel } from "./filter.js";
 import { braveSearch } from "./providers/brave.js";
 import { customSearch } from "./providers/custom.js";
@@ -61,7 +66,7 @@ export const webSearchTool: ToolDef<typeof schema> = {
   inputSchema: schema,
   permission: "network",
   async execute(input, ctx) {
-    const backend = resolveSearchBackend(ctx.config?.webSearch);
+    const backends = listAutoSearchBackends(ctx.config?.webSearch);
     const locale = resolveSearchLocale(input.query, ctx.config?.webSearch, {
       language: input.language,
       region: input.region,
@@ -75,35 +80,62 @@ export const webSearchTool: ToolDef<typeof schema> = {
       else ctx.signal.addEventListener("abort", onAbort, { once: true });
     }
     const max = input.max_results ?? 8;
-    try {
-      let hits: SearchHit[];
+    const allowed = [
+      ...(ctx.config?.webSearch?.allowedDomains ?? []),
+      ...(input.allowed_domains ?? []),
+    ];
+    const blocked = [
+      ...(ctx.config?.webSearch?.blockedDomains ?? []),
+      ...(input.blocked_domains ?? []),
+    ];
+
+    async function runOne(backend: ResolvedSearchBackend): Promise<SearchHit[]> {
       switch (backend.provider) {
         case "brave":
-          hits = await braveSearch(input.query, max, backend, locale, controller.signal, ctx);
-          break;
+          return braveSearch(input.query, max, backend, locale, controller.signal, ctx);
         case "serper":
-          hits = await serperSearch(input.query, max, backend, locale, controller.signal, ctx);
-          break;
+          return serperSearch(input.query, max, backend, locale, controller.signal, ctx);
         case "google":
-          hits = await googleSearch(input.query, max, backend, locale, controller.signal, ctx);
-          break;
+          return googleSearch(input.query, max, backend, locale, controller.signal, ctx);
         case "custom":
-          hits = await customSearch(input.query, max, backend.custom, locale, controller.signal, {
+          return customSearch(input.query, max, backend.custom, locale, controller.signal, {
             storedKey: backend.apiKey,
             env: backend.env,
           });
-          break;
         default:
-          hits = await duckDuckGoSearch(input.query, max, locale, controller.signal);
+          return duckDuckGoSearch(input.query, max, locale, controller.signal);
       }
-      const allowed = [
-        ...(ctx.config?.webSearch?.allowedDomains ?? []),
-        ...(input.allowed_domains ?? []),
-      ];
-      const blocked = [
-        ...(ctx.config?.webSearch?.blockedDomains ?? []),
-        ...(input.blocked_domains ?? []),
-      ];
+    }
+
+    try {
+      let lastErr: unknown;
+      let used: ResolvedSearchBackend | undefined;
+      let hits: SearchHit[] = [];
+      for (let i = 0; i < backends.length; i++) {
+        const backend = backends[i]!;
+        try {
+          hits = await runOne(backend);
+          used = backend;
+          lastErr = undefined;
+          break;
+        } catch (err) {
+          lastErr = err;
+          const more = i < backends.length - 1;
+          if (!more || !isRetriableSearchError(err)) break;
+        }
+      }
+      if (lastErr || !used) {
+        const backend = backends[0]!;
+        const msg = formatFetchError(lastErr ?? new Error("no backend"), SEARCH_TIMEOUT_MS);
+        const hint =
+          backend.provider === "duckduckgo"
+            ? " DuckDuckGo is often blocked; set BRAVE_API_KEY / SERPER_API_KEY, configure webSearch.provider=custom, or web_fetch a known URL."
+            : " Try web_fetch with a direct URL, or another webSearch.provider.";
+        return {
+          content: `web_search (${backend.provider}) failed: ${msg}.${hint}`,
+          isError: true,
+        };
+      }
       hits = filterSearchHitsByDomain(hits, allowed, blocked).slice(0, max);
       if (hits.length === 0) {
         return { content: `no results for "${input.query}".` };
@@ -112,22 +144,10 @@ export const webSearchTool: ToolDef<typeof schema> = {
       const locTag = [langRegion, locale.freshness].filter(Boolean).join(", ");
       const body = formatSearchResultsForModel(input.query, hits, {
         via:
-          backend.provider === "duckduckgo"
-            ? undefined
-            : (backend.engineId ?? backend.provider),
+          used.provider === "duckduckgo" ? undefined : (used.engineId ?? used.provider),
         localeTag: locTag || undefined,
       });
       return { content: sanitizeUntrustedMcpText(body) };
-    } catch (err) {
-      const msg = formatFetchError(err, SEARCH_TIMEOUT_MS);
-      const hint =
-        backend.provider === "duckduckgo"
-          ? " DuckDuckGo is often blocked; set BRAVE_API_KEY / SERPER_API_KEY, configure webSearch.provider=custom, or web_fetch a known URL."
-          : " Try web_fetch with a direct URL, or another webSearch.provider.";
-      return {
-        content: `web_search (${backend.provider}) failed: ${msg}.${hint}`,
-        isError: true,
-      };
     } finally {
       clearTimeout(timer);
       if (ctx.signal) ctx.signal.removeEventListener("abort", onAbort);

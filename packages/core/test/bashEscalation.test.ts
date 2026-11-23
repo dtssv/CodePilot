@@ -45,22 +45,22 @@ describe("bash per-command sandbox escalation", () => {
     } as ToolContext;
   }
 
-  it("a normal command uses the persistent shell", async () => {
+  it("foreground bash uses a dedicated child (not the persistent shell)", async () => {
+    // Dedicated children can be adopted into bashJobs on timeout; the session
+    // persistent shell cannot detach one in-flight command.
     const ps = mockPersistentShell();
     const res = await bashTool.execute({ command: "echo normal" }, ctx(ps));
-    expect(ps.calls).toEqual(["echo normal"]);
-    expect(res.content).toContain("[persistent]");
+    expect(ps.calls).toEqual([]);
+    expect(res.content).toContain("normal");
   });
 
-  it("an escalated command BYPASSES the persistent shell and runs unsandboxed", async () => {
+  it("an escalated command runs unsandboxed on a dedicated child", async () => {
     const ps = mockPersistentShell();
     const res = await bashTool.execute(
       { command: "echo escalated-out", escalate_sandbox: true, justification: "needs host" },
       ctx(ps),
     );
-    // Did NOT touch the jailed persistent shell.
     expect(ps.calls).toEqual([]);
-    // Actually ran the command (one-shot, unsandboxed).
     expect(res.content).toContain("escalated-out");
     expect(res.isError).toBeFalsy();
   });

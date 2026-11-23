@@ -10,6 +10,14 @@ import {
   splitAttachments,
   type PendingAttachment,
 } from "../../state/attachments.js";
+import {
+  findMentionAtCaret,
+  formatComposerRef,
+  mergeRefsIntoPrompt,
+  newComposerRef,
+  composerRefLabel,
+  type ComposerRef,
+} from "../../state/composerRefs.js";
 import { t } from "../../i18n.js";
 import { MentionMenu, mentionMenuHandleKey, detectTrigger, applyPick } from "../MentionMenu.js";
 import { FileIcon, SendIcon, StopIcon, XIcon } from "../Icons.js";
@@ -18,6 +26,9 @@ import { ModeSwitch } from "./ModeSwitch.js";
 export interface ComposerProps {
   value: string;
   onChange(v: string): void;
+  /** Structured file/selection refs shown as chips (atomic remove). */
+  refs?: ComposerRef[];
+  onRefsChange?(refs: ComposerRef[]): void;
   /** Resolves when the server accepted the prompt. Reject on failure so the
    * composer can restore the draft (avoids lost text + accidental double-send). */
   onSend(
@@ -39,13 +50,18 @@ export interface ComposerProps {
    * picker keeps a usable minimum width at ~250px. */
   compact?: boolean;
   autoFocus?: boolean;
+  /** Action-row trailing content (typically the model picker). */
   footer?: React.ReactNode;
+  /** Optional usage / context row rendered below the action row. */
+  statusBar?: React.ReactNode;
   followUps?: FollowUpItem[];
   onRemoveFollowUp?(id: string): void;
   /** Pull a queued item back into the composer for editing. */
   onEditFollowUp?(id: string): void;
   /** Inject this queued item into the current run (steer; does not cancel). */
   onSendFollowUpNow?(id: string): void | Promise<void>;
+ /** Injects waiting for the current step to finish. */
+  pendingSteers?: string[];
   /** Server-backed `/` command + `@` mention completion. When present the
    * composer shows an autocomplete menu for the `/` and `@` triggers. */
   menuProvider?: import("../MentionMenu.js").MenuProvider;
@@ -57,6 +73,8 @@ export interface ComposerProps {
 export function Composer({
   value,
   onChange,
+  refs: refsProp,
+  onRefsChange,
   onSend,
   onStop,
   busy,
@@ -69,20 +87,30 @@ export function Composer({
   compact = false,
   autoFocus = false,
   footer,
+  statusBar,
   followUps = [],
   onRemoveFollowUp,
   onEditFollowUp,
   onSendFollowUpNow,
+  pendingSteers = [],
   menuProvider,
 }: ComposerProps): React.ReactElement {
   const ref = useRef<HTMLTextAreaElement>(null);
   const [trigger, setTrigger] = useState<import("../MentionMenu.js").Trigger | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [localRefs, setLocalRefs] = useState<ComposerRef[]>([]);
+  const refs = refsProp ?? localRefs;
+  const setRefs = onRefsChange ?? setLocalRefs;
   const [dragging, setDragging] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   /** Guard against double Enter / double-click while a send is in flight. */
   const sendingRef = useRef(false);
+
+  const addPathRef = (path: string, startLine?: number, endLine?: number): void => {
+    const next = newComposerRef({ path, startLine, endLine });
+    setRefs([...refs.filter((r) => r.id !== next.id), next]);
+  };
 
   const addFiles = (files: File[]): void => {
     if (files.length === 0) return;
@@ -110,25 +138,30 @@ export function Composer({
     if (autoFocus && !disabled) ref.current?.focus();
   }, [autoFocus, disabled]);
 
-  const canSend = !disabled && (value.trim() !== "" || attachments.length > 0);
+  const canSend = !disabled && (value.trim() !== "" || attachments.length > 0 || refs.length > 0);
   const send = (delivery: "auto" | "steer" = "auto"): void => {
     if (sendingRef.current || !canSend) return;
     // Inject-into-run is text-only (attachments stay on the queue path).
     if (delivery === "steer" && attachments.length > 0) return;
     const pendingAttachments = attachments;
+    const pendingRefs = refs;
     const { images, files } = splitAttachments(pendingAttachments);
     const fallback =
       images.length > 0 && files.length === 0
         ? t("See the attached image.")
         : files.length > 0
           ? t("See the attached file.")
-          : t("See the attached image.");
-    const text = value.trim() || fallback;
+          : pendingRefs.length > 0
+            ? ""
+            : t("See the attached image.");
+    const text = mergeRefsIntoPrompt(value.trim() || fallback, pendingRefs);
+    if (!text.trim() && images.length === 0 && files.length === 0) return;
     const resolvedDelivery = busy ? delivery : "auto";
     // Clear optimistically for snappy UX, but restore the draft if the
     // server rejects the send — otherwise the text is lost and a retype
     // often produces a duplicate once the first request actually lands.
     onChange("");
+    setRefs([]);
     setAttachments([]);
     setAttachError(null);
     sendingRef.current = true;
@@ -141,7 +174,8 @@ export function Composer({
       ),
     )
       .catch(() => {
-        onChange(text);
+        onChange(value);
+        setRefs(pendingRefs);
         setAttachments(pendingAttachments);
       })
       .finally(() => {
@@ -151,6 +185,24 @@ export function Composer({
 
   return (
     <div className="flex w-full flex-col gap-2">
+      {pendingSteers.length > 0 && (
+        <div
+          className="flex flex-col gap-1.5 rounded-xl border border-[var(--color-accent)]/30 bg-[var(--color-accent-dim)]/40 px-2.5 py-2"
+          aria-label={t("Pending injections")}
+        >
+          <div className="px-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-accent)]">
+            {t("Will apply after the current step")} · {pendingSteers.length}
+          </div>
+          {pendingSteers.map((text, i) => (
+            <div
+              key={`steer-${i}-${text.slice(0, 24)}`}
+              className="rounded-lg border border-[var(--color-accent)]/25 bg-[var(--color-surface-raised)] px-2 py-1.5 text-[12px] leading-5 text-[var(--color-ink)]"
+            >
+              <span className="line-clamp-3 whitespace-pre-wrap break-words">{text}</span>
+            </div>
+          ))}
+        </div>
+      )}
       {followUps.length > 0 && (
         <div
           className="flex flex-col gap-1.5 rounded-xl border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)]/80 px-2.5 py-2"
@@ -223,12 +275,30 @@ export function Composer({
         e.preventDefault();
         addFiles(files);
       }}
-      className={`relative rounded-2xl border bg-[var(--color-surface-raised)] shadow-sm transition-all focus-within:border-[var(--color-accent)] focus-within:shadow-[0_0_0_3px_var(--color-accent-dim)] ${
+      className={`relative overflow-hidden rounded-2xl border bg-[var(--color-surface-raised)] shadow-sm transition-all focus-within:border-[var(--color-accent)]/70 focus-within:shadow-[0_0_0_2px_var(--color-accent-dim)] ${
         dragging ? "border-[var(--color-accent)]" : "border-[var(--color-edge)]"
       } ${disabled ? "opacity-60" : ""}`}
     >
-      {attachments.length > 0 && (
+      {(refs.length > 0 || attachments.length > 0) && (
         <div className="flex flex-wrap gap-2 px-3 pt-3">
+          {refs.map((r) => (
+            <div
+              key={r.id}
+              className="group relative flex max-w-[14rem] items-center gap-1.5 rounded-lg border border-[var(--color-accent)]/40 bg-[var(--color-accent-dim)] px-2 py-1"
+              title={formatComposerRef(r)}
+            >
+              <FileIcon className="h-3.5 w-3.5 shrink-0 text-[var(--color-ink-dim)]" />
+              <span className="truncate text-[11px] text-[var(--color-ink)]">{composerRefLabel(r)}</span>
+              <button
+                type="button"
+                onClick={() => setRefs(refs.filter((x) => x.id !== r.id))}
+                aria-label={t("Remove reference")}
+                className="ml-0.5 flex h-4 w-4 items-center justify-center rounded-full text-[var(--color-ink-dim)] hover:bg-[var(--color-surface)] hover:text-[var(--color-ink)]"
+              >
+                <XIcon className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
           {attachments.map((a) => (
             <div key={a.id} className="group relative">
               {a.kind === "image" ? (
@@ -267,6 +337,28 @@ export function Composer({
           onClose={() => setTrigger(null)}
           onPick={({ insert, keepOpen }) => {
             if (!trigger) return;
+            // Final @file/@dir/@git pick → chip (atomic), not plain text.
+            if (
+              !keepOpen &&
+              trigger.kind === "at" &&
+              trigger.atKind &&
+              (trigger.atKind === "file" || trigger.atKind === "dir" || trigger.atKind === "git") &&
+              insert.startsWith("@")
+            ) {
+              const token = insert.trim().replace(/^@/, "");
+              addPathRef(token);
+              const cleared = value.slice(0, trigger.start) + value.slice(trigger.end);
+              onChange(cleared);
+              setTrigger(null);
+              requestAnimationFrame(() => {
+                const el = ref.current;
+                if (el) {
+                  el.focus();
+                  el.setSelectionRange(trigger.start, trigger.start);
+                }
+              });
+              return;
+            }
             const applied = applyPick(value, trigger, insert);
             onChange(applied.text);
             // A category pick (keepOpen) keeps the menu up, re-detecting the
@@ -315,6 +407,27 @@ export function Composer({
             e.preventDefault();
             return;
           }
+          // Atomic @mention delete: remove whole `@path` / `@path:L1-2` token.
+          if ((e.key === "Backspace" || e.key === "Delete") && !e.metaKey && !e.ctrlKey && !e.altKey) {
+            const el = ref.current;
+            if (el && el.selectionStart === el.selectionEnd) {
+              const span = findMentionAtCaret(
+                value,
+                el.selectionStart,
+                e.key === "Backspace" ? "backspace" : "delete",
+              );
+              if (span) {
+                e.preventDefault();
+                const next = value.slice(0, span.start) + value.slice(span.end);
+                onChange(next);
+                requestAnimationFrame(() => {
+                  el.setSelectionRange(span.start, span.start);
+                  if (menuProvider) setTrigger(detectTrigger(next, span.start));
+                });
+                return;
+              }
+            }
+          }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             if ((e.metaKey || e.ctrlKey) && busy) send("steer");
@@ -327,7 +440,7 @@ export function Composer({
         placeholder={
           placeholder ??
           (busy
-            ? t("Queued on Enter · ⌘↵ inject into current run…")
+            ? t("Enter=queue · ⌘↵/Inject=apply after current step…")
             : t("Ask CodePilot…"))
         }
         disabled={disabled}
@@ -336,7 +449,11 @@ export function Composer({
           size === "lg" ? "min-h-20 pt-4 pb-2 text-[14.5px] leading-6" : "min-h-11 pt-3 pb-1 text-[13px] leading-6"
         }`}
       />
-      <div className={`flex items-center px-2.5 pb-2.5 ${compact ? "gap-1" : "gap-2"}`}>
+      <div
+        className={`flex items-center px-2.5 ${compact ? "gap-1" : "gap-2"} ${
+          statusBar ? "pb-1.5" : "pb-2.5"
+        }`}
+      >
         <input
           ref={fileRef}
           type="file"
@@ -360,17 +477,18 @@ export function Composer({
         {modes.length > 1 && mode && onMode && (
           <ModeSwitch mode={mode} modes={modes} onMode={onMode} disabled={disabled} compact={compact} />
         )}
-        {/* overflow-visible: ModelPicker menu portals out; truncate clipped it. */}
-        <div className="min-w-0 flex-1 overflow-visible text-[11px] text-[var(--color-ink-faint)]">
-          {footer}
-        </div>
+        <div className="min-w-0 flex-1" aria-hidden="true" />
+        {/* Model sits by send; overflow-visible so the menu isn't clipped. */}
+        {footer ? (
+          <div className="min-w-0 max-w-[55%] shrink overflow-visible">{footer}</div>
+        ) : null}
         {busy && (
           <button
             type="button"
             onClick={() => send("steer")}
             disabled={!canSend || attachments.length > 0}
-            title={t("Inject into current run (⌘↵)")}
-            aria-label={t("Inject into current run")}
+            title={t("Insert into current run (⌘↵) — applies after the current step finishes")}
+            aria-label={t("Insert into current run")}
             className="flex h-8 shrink-0 items-center gap-1 rounded-full border border-[var(--color-edge)] px-2.5 text-[11px] text-[var(--color-ink-dim)] transition-colors hover:bg-[var(--color-surface-sunken)] hover:text-[var(--color-ink)] disabled:cursor-not-allowed disabled:opacity-30"
           >
             {t("Inject")}
@@ -382,7 +500,7 @@ export function Composer({
               type="button"
               onClick={() => send("auto")}
               disabled={!canSend}
-              title={t("Queue for after this run (Enter)")}
+              title={t("Queue for after this run finishes (Enter)")}
               aria-label={t("Queue")}
               className="cp-brand-gradient flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white shadow-md shadow-[var(--color-accent-dim)] transition-all hover:scale-105 disabled:cursor-not-allowed disabled:opacity-30 disabled:shadow-none disabled:hover:scale-100"
             >
@@ -410,6 +528,11 @@ export function Composer({
           </button>
         )}
       </div>
+      {statusBar ? (
+        <div className="flex min-w-0 items-center gap-2 bg-[var(--color-surface-sunken)]/55 px-3 py-2 text-[10.5px] leading-4 text-[var(--color-ink-faint)]">
+          {statusBar}
+        </div>
+      ) : null}
     </div>
     </div>
   );

@@ -9,6 +9,9 @@ import { existsSync } from "node:fs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { createLogger } from "../telemetry/logger.js";
+
+const log = createLogger("skills");
 
 // ---------------------------------------------------------------------------
 // Types
@@ -91,8 +94,40 @@ export function parseSkillMd(
 
   const fmLines = lines.slice(1, end);
   let currentKey: string | null = null;
+  /** Active block scalar for description (`|` keep newlines, `>` fold). */
+  let blockKind: "|" | ">" | null = null;
+  const blockLines: string[] = [];
+  const flushBlock = () => {
+    if (!blockKind || currentKey !== "description") {
+      blockKind = null;
+      blockLines.length = 0;
+      return;
+    }
+    if (blockKind === "|") {
+      out.description = blockLines.join("\n").replace(/\s+$/, "");
+    } else {
+      out.description = blockLines
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+    blockKind = null;
+    blockLines.length = 0;
+  };
   for (const raw of fmLines) {
     const line = raw.replace(/\s+$/, "");
+    if (blockKind) {
+      if (line.length === 0) {
+        blockLines.push("");
+        continue;
+      }
+      if (/^\s/.test(line)) {
+        blockLines.push(line.replace(/^\s+/, ""));
+        continue;
+      }
+      flushBlock();
+      // fall through to parse this line as a new key
+    }
     if (line.length === 0) continue;
     if (/^\s/.test(line) && currentKey) {
  // Continuation — list item under the current key.
@@ -110,6 +145,11 @@ export function parseSkillMd(
     const key = m[1]!.toLowerCase();
     const value = (m[2] ?? "").trim();
     currentKey = key;
+    if (key === "description" && (value === "|" || value === ">" || value === "|-" || value === ">-" || value === "|+" || value === ">+")) {
+      blockKind = value.startsWith(">") ? ">" : "|";
+      blockLines.length = 0;
+      continue;
+    }
     if (value.length === 0) continue; // list starts on next line
     if (key === "name") out.name = stripQuotes(value);
     else if (key === "description") out.description = stripQuotes(value);
@@ -131,6 +171,7 @@ export function parseSkillMd(
       }
     }
   }
+  flushBlock();
   return out;
 }
 
@@ -160,53 +201,66 @@ export function defaultBuiltinSkillsDir(): string {
   return join(pkgRoot, ...BUILTIN_SKILLS_DIR_HINT);
 }
 
-/** Walk a directory looking for immediate subdirectories that contain a
- * `SKILL.md`. Non-recursive on purpose — each skill is exactly one folder.
- * Missing directories are not an error — they simply return `[]`, and the
- * caller falls back to the embedded built-in skills. */
+/** Max BFS depth when scanning for SKILL.md (root = 0). */
+const SKILL_SCAN_MAX_DEPTH = 6;
+
+/** Walk a directory looking for folders that contain a `SKILL.md`. BFS up to
+ * {@link SKILL_SCAN_MAX_DEPTH}; a directory with SKILL.md is loaded and not
+ * descended further. Missing directories return `[]`. */
 async function scanDirForSkills(
   dir: string,
   source: SkillSource
 ): Promise<Skill[]> {
   if (!existsSync(dir)) return [];
-  let entries: string[];
-  try {
-    entries = await readdir(dir);
-  } catch {
-    return [];
-  }
   const out: Skill[] = [];
-  for (const entry of entries) {
-    if (entry.startsWith(".")) continue;
-    const skillDir = join(dir, entry);
-    let st;
+  const queue: Array<{ path: string; depth: number }> = [{ path: dir, depth: 0 }];
+  while (queue.length > 0) {
+    const { path: cur, depth } = queue.shift()!;
+    let entries: string[];
     try {
-      st = await stat(skillDir);
+      entries = await readdir(cur);
     } catch {
       continue;
     }
-    if (!st.isDirectory()) continue;
-    const skillPath = join(skillDir, "SKILL.md");
-    let text: string;
-    try {
-      text = await readFile(skillPath, "utf-8");
-    } catch {
-      continue;
+    for (const entry of entries) {
+      if (entry.startsWith(".")) continue;
+      const child = join(cur, entry);
+      let st;
+      try {
+        st = await stat(child);
+      } catch {
+        continue;
+      }
+      if (!st.isDirectory()) continue;
+      const skillPath = join(child, "SKILL.md");
+      let text: string | null = null;
+      try {
+        text = await readFile(skillPath, "utf-8");
+      } catch {
+        text = null;
+      }
+      if (text !== null) {
+        const fm = parseSkillMd(text);
+        const body = stripFrontmatter(text);
+        const name = fm.name ?? entry;
+        out.push({
+          name,
+          description: fm.description ?? "",
+          when: fm.when,
+          tools: fm.tools,
+          path: skillPath,
+          dir: child,
+          source,
+          body,
+          userInvocableOnly: fm.userInvocableOnly,
+        });
+        // Stop descending once a skill folder is found.
+        continue;
+      }
+      if (depth + 1 <= SKILL_SCAN_MAX_DEPTH) {
+        queue.push({ path: child, depth: depth + 1 });
+      }
     }
-    const fm = parseSkillMd(text);
-    const body = stripFrontmatter(text);
-    const name = fm.name ?? entry;
-    out.push({
-      name,
-      description: fm.description ?? "",
-      when: fm.when,
-      tools: fm.tools,
-      path: skillPath,
-      dir: skillDir,
-      source,
-      body,
-      userInvocableOnly: fm.userInvocableOnly,
-    });
   }
   return out;
 }
@@ -247,9 +301,8 @@ function stripFrontmatter(text: string): string {
 }
 
 /** Discover skills from all sources. First definition of a name wins
- * (project > user > compat > builtin). `extraDirs` is scanned after builtins
- * with the `project` label. Built-ins prefer on-disk `packages/core/skills/`,
- * falling back to the embedded `BUILTIN_SKILLS` table. */
+ * (project > user > compat > extraDirs/plugins > builtin). Built-ins prefer
+ * on-disk `packages/core/skills/`, falling back to the embedded table. */
 export async function discoverSkills(
   cwd: string,
   extraDirs: string[] | string | DiscoverOptions = []
@@ -265,10 +318,16 @@ export async function discoverSkills(
   const extra = opts.extraDirs ?? [];
 
   const collected: Skill[] = [];
-  const seen = new Set<string>();
+  const seen = new Map<string, SkillSource>();
   const add = (s: Skill) => {
-    if (seen.has(s.name)) return;
-    seen.add(s.name);
+    const prior = seen.get(s.name);
+    if (prior !== undefined) {
+      log.warn(
+        `skill "${s.name}" from ${s.source} skipped — already defined by ${prior}`,
+      );
+      return;
+    }
+    seen.set(s.name, s.source);
     collected.push(s);
   };
 
@@ -294,6 +353,7 @@ export async function discoverSkills(
     }
   }
 
+  // Plugin / config extra dirs (before builtins so they can override builtins).
   for (const ed of extra) {
     if (!ed) continue;
     const abs = isAbsolute(ed) ? ed : resolve(cwd, ed);
@@ -375,30 +435,58 @@ export function matchSkill(skills: Skill[], query: string): Skill | null {
 // System-prompt section (progressive disclosure)
 // ---------------------------------------------------------------------------
 
+/** Default per-skill description cap (characters). */
+export const SKILL_DESC_MAX_CHARS = 250;
+/** Default catalog budget ≈ 1% of a 200k context window (characters). */
+export const SKILL_CATALOG_DEFAULT_BUDGET_CHARS = 2_000;
+
+export interface SkillsPromptSectionOptions {
+  /** Total character budget for skill lines (excluding the wrapper blurb). */
+  budgetChars?: number;
+  /** Per-skill description truncation. */
+  descMaxChars?: number;
+}
+
 /** Render the system-prompt skill list: name + one-line description only.
  * Full instructions load on demand via the `skill` tool to keep the prefix
- * small. */
-export function skillsPromptSection(skills: Skill[]): string {
+ * small. Applies a catalog budget; over-budget non-builtin skills degrade to
+ * bare `- name`. Does not render frontmatter `tools:` (advisory-only; not
+ * enforced at load time). */
+export function skillsPromptSection(
+  skills: Skill[],
+  opts?: SkillsPromptSectionOptions,
+): string {
   // Skills flagged user-invocable-only are discovered and still loadable by
   // name, but omitted from the model-facing catalog so they do not occupy the
   // description budget and the model will not pick them on its own.
   const advertised = skills.filter((s) => !s.userInvocableOnly);
   if (advertised.length === 0) return "";
-  const lines: string[] = [];
-  lines.push(`<skills>`);
-  lines.push(
+  const budget = opts?.budgetChars ?? SKILL_CATALOG_DEFAULT_BUDGET_CHARS;
+  const descMax = opts?.descMaxChars ?? SKILL_DESC_MAX_CHARS;
+  const header =
     "The following skills are available. Each one is a reusable instruction " +
-      "set you can load on demand by calling the `skill` tool with the skill " +
-      "name. Load when the user request matches a description — pick the **single " +
-      "best** match (load a second only if scopes do not overlap); **no match → do not load**. The tool returns " +
-      "the full body: **append** it (replaces only the one-line blurb above). Core " +
-      "Safety / Evidence / Git always win over any skill; if two loaded skills " +
-      "conflict, the later load wins for workflow steps only."
-  );
+    "set you can load on demand by calling the `skill` tool with the skill " +
+    "name. Load when the user request matches a description — pick the **single " +
+    "best** match (load a second only if scopes do not overlap); **no match → do not load**. The tool returns " +
+    "the full body: **append** it (replaces only the one-line blurb above). Core " +
+    "Safety / Evidence / Git always win over any skill; if two loaded skills " +
+    "conflict, the later load wins for workflow steps only.";
+  const lines: string[] = [`<skills>`, header];
+  let used = 0;
   for (const s of advertised) {
     const when = s.when ? ` — when: ${s.when}` : "";
-    const tools = s.tools && s.tools.length > 0 ? ` [tools: ${s.tools.join(", ")}]` : "";
-    lines.push(`- \`${s.name}\`: ${s.description || "(no description)"}${when}${tools}`);
+    let desc = (s.description || "(no description)").replace(/\s+/g, " ").trim();
+    if (desc.length > descMax) desc = `${desc.slice(0, descMax - 1)}…`;
+    let line = `- \`${s.name}\`: ${desc}${when}`;
+    if (used + line.length > budget && s.source !== "builtin") {
+      line = `- \`${s.name}\``;
+    }
+    if (used + line.length > budget && s.source !== "builtin") {
+      // Still over budget even as a bare name — skip non-builtin.
+      continue;
+    }
+    lines.push(line);
+    used += line.length + 1;
   }
   lines.push(`</skills>`);
   return lines.join("\n");

@@ -24,7 +24,21 @@ const ctx = { controller: { kind: "mock" as const, listSessions: async () => [],
 describe("runCommandWithCustom", () => {
   it("built-in commands still resolve through runCommand", () => {
     const r = runCommandWithCustom("/help", ctx, []);
-    expect(r.kind).toBe("system");
+    expect(r.kind).toBe("help");
+  });
+
+  it("/help and /? both render the full catalog with argument hints", () => {
+    for (const input of ["/help", "/?"]) {
+      const r = runCommandWithCustom(input, ctx, []);
+      expect(r.kind).toBe("help");
+      if (r.kind !== "help") continue;
+      // Every documented command is listed with its optional arguments.
+      expect(r.text).toContain("/rewind [n] [--keep-files]");
+      expect(r.text).toContain("/mode [ask|auto-edit|yolo|auto|dont-ask]");
+      expect(r.text).toContain("/export [md|jsonl] [path]");
+      expect(r.text).toContain("/gc-artifacts");
+      expect(r.text).toContain("/vim [on|off]");
+    }
   });
 
   it("built-in /model wins over a custom /model", () => {

@@ -29,6 +29,7 @@ import {
 import { liveSessions, type LiveSession } from "./server/liveSessions.js";
 import type { McpOauthState } from "./server/mcpOpenAuth.js";
 import {
+  handleCommandsExpand,
   handleCommandsList,
   handleWorkspaceBrowse,
   handleWorkspaceComplete,
@@ -73,8 +74,12 @@ import {
   handlePermissionsRemove,
   handleQuestionRespond,
   handleSessionArchive,
+  handleSessionDescribeAgents,
+  handleSessionDescribeHooks,
+  handleSessionExport,
   handleSessionFork,
   handleSessionGetEndpoint,
+  handleSessionGoal,
   handleSessionHistory,
   handleSessionList,
   handleSessionNew,
@@ -83,6 +88,8 @@ import {
   handleSessionResume,
   handleSessionSetMode,
   handleSessionSetModel,
+  handleSessionSetPermissionMode,
+  handleSessionSetPreset,
   handleSessionUndo,
   liveSessionOrThrow,
 } from "./server/handlers/session.js";
@@ -162,6 +169,8 @@ import {
 export type { ServerContext } from "./server/context.js";
 export * from "./server/wireTypes.js";
 import type {
+  CommandsExpandParams,
+  CommandsExpandResult,
   CommandsListParams,
   CommandsListResult,
   CompletionCancelParams,
@@ -470,6 +479,9 @@ export function registerServer(
   peer.onRequest<CommandsListParams, CommandsListResult>("commands/list", (p) =>
     handleCommandsList(ctx, p),
   );
+  peer.onRequest<CommandsExpandParams, CommandsExpandResult>("commands/expand", (p) =>
+    handleCommandsExpand(ctx, p),
+  );
   peer.onRequest<WorkspaceCompleteParams, WorkspaceCompleteResult>("workspace/complete", (p) =>
     handleWorkspaceComplete(ctx, p),
   );
@@ -611,6 +623,30 @@ export function registerServer(
   peer.onRequest<{ sessionId: string }, { restored: string[]; deleted: string[]; label: string }>(
     "session/redo",
     (p) => handleSessionRedo(ctx, p),
+  );
+  peer.onRequest<{ sessionId: string; mode: PermissionMode }, { mode: PermissionMode }>(
+    "session/setPermissionMode",
+    (p) => handleSessionSetPermissionMode(ctx, p),
+  );
+  peer.onRequest<
+    { sessionId: string; preset: import("@codepilot/core").PermissionPresetName },
+    Awaited<ReturnType<typeof handleSessionSetPreset>>
+  >("session/setPreset", (p) => handleSessionSetPreset(ctx, p));
+  peer.onRequest<
+    { sessionId: string; format?: "markdown" | "jsonl" },
+    Awaited<ReturnType<typeof handleSessionExport>>
+  >("session/export", (p) => handleSessionExport(ctx, p));
+  peer.onRequest<
+    { sessionId: string; objective: string; maxRounds?: number },
+    { accepted: true; running: boolean }
+  >("session/goal", (p) => handleSessionGoal(ctx, p));
+  peer.onRequest<{ sessionId: string }, { text: string }>(
+    "session/describeHooks",
+    (p) => handleSessionDescribeHooks(ctx, p),
+  );
+  peer.onRequest<{ sessionId?: string; cwd?: string }, { text: string }>(
+    "session/describeAgents",
+    (p) => handleSessionDescribeAgents(ctx, p),
   );
   peer.onRequest<{ sessionId: string }, Array<{ messageId: string; text: string; ts?: number }>>(
     "session/rewindTargets",

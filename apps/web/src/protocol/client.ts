@@ -181,6 +181,8 @@ export class CodepilotClient {
           input: p.input,
           reason: p.reason,
           ...(p.sandboxExpand ? { sandboxExpand: p.sandboxExpand } : {}),
+          ...(p.sandboxEscalation ? { sandboxEscalation: true as const } : {}),
+          ...(p.preview ? { preview: p.preview } : {}),
         });
  // The server waits for a separate `permission/respond` call, so the
  // reverse request itself is answered immediately.
@@ -361,12 +363,25 @@ export class CodepilotClient {
       name: string;
       description: string;
       argumentHint?: string;
-      source: "builtin" | "project" | "user" | "plugin";
+      source: "builtin" | "project" | "user" | "plugin" | "mcp";
       kind: "local" | "prompt";
     }>;
     warnings: string[];
   }> {
     return clientWorkspace.commandsList(this.rpcHost(), cwd);
+  }
+
+  async commandsExpand(
+    name: string,
+    args?: string,
+    cwd?: string,
+  ): Promise<{
+    prompt: string;
+    model?: string;
+    allowedTools?: string[];
+    source: "builtin" | "project" | "user" | "plugin" | "mcp";
+  }> {
+    return clientWorkspace.commandsExpand(this.rpcHost(), name, args, cwd);
   }
 
   /** `@`-mention completion candidates (file/dir/mcp/git/skill). */
@@ -375,6 +390,7 @@ export class CodepilotClient {
     opts: { kinds?: Array<"file" | "dir" | "mcp" | "git" | "skill">; maxResults?: number; cwd?: string } = {},
   ): Promise<{
     candidates: Array<{ kind: "file" | "dir" | "mcp" | "git" | "skill"; value: string; label: string; detail?: string }>;
+    truncated?: boolean;
   }> {
     return clientWorkspace.workspaceComplete(this.rpcHost(), query, opts);
   }
@@ -641,6 +657,57 @@ export class CodepilotClient {
     opts?: { messageId?: string; files?: boolean },
   ): Promise<{ messageId: string; text: string; turns: number; restored: string[]; deleted: string[] }> {
     return clientSession.rewindSession(this.rpcHost(), sessionId, opts);
+  }
+
+  async gcSessionArtifacts(
+    sessionId: string,
+    dryRun?: boolean,
+  ): Promise<{ removed: number; bytesReclaimed: number; scanned: number; referenced: number }> {
+    return clientSession.gcSessionArtifacts(this.rpcHost(), sessionId, dryRun);
+  }
+
+  async exportSessionTranscript(
+    sessionId: string,
+    format?: "markdown" | "jsonl",
+  ): Promise<{ format: "markdown" | "jsonl"; body: string; suggestedName: string }> {
+    return clientSession.exportSessionTranscript(this.rpcHost(), sessionId, format);
+  }
+
+  async startSessionGoal(
+    sessionId: string,
+    objective: string,
+    maxRounds?: number,
+  ): Promise<{ accepted: true; running: boolean }> {
+    return clientSession.startSessionGoal(this.rpcHost(), sessionId, objective, maxRounds);
+  }
+
+  async setPermissionMode(
+    sessionId: string,
+    mode: import("@codepilot/core").PermissionMode,
+  ): Promise<{ mode: import("@codepilot/core").PermissionMode }> {
+    return clientSession.setPermissionMode(this.rpcHost(), sessionId, mode);
+  }
+
+  async setPreset(
+    sessionId: string,
+    preset: import("@codepilot/core").PermissionPresetName,
+  ): Promise<{
+    preset: import("@codepilot/core").PermissionPresetName;
+    permissionMode: import("@codepilot/core").PermissionMode;
+    sandbox: { mode: string; unavailable?: boolean; backend?: string };
+  }> {
+    return clientSession.setPreset(this.rpcHost(), sessionId, preset);
+  }
+
+  async describeSessionHooks(sessionId: string): Promise<{ text: string }> {
+    return clientSession.describeSessionHooks(this.rpcHost(), sessionId);
+  }
+
+  async describeSessionAgents(opts?: {
+    sessionId?: string;
+    cwd?: string;
+  }): Promise<{ text: string }> {
+    return clientSession.describeSessionAgents(this.rpcHost(), opts);
   }
 
   async listConnectors(opts?: {

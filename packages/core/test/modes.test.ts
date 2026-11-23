@@ -25,15 +25,13 @@ import {
   globTool,
   grepTool,
   lsTool,
-  planUpdateTool,
+  planTool,
   memoryWriteTool,
   readArtifactTool,
   askUserQuestionTool,
-  planDoneTool,
   startNewTaskTool,
   suggestModeTool,
-  startGoalTool,
-  goalStatusTool,
+  goalTool,
   taskTool,
   codeModeTool,
   harnessBridgeTool,
@@ -47,7 +45,7 @@ describe("filterToolsByMode", () => {
       readFileTool,
       bashTool,
       writeFileTool,
-      planUpdateTool,
+      planTool,
       memoryWriteTool,
       taskTool,
     ];
@@ -56,7 +54,7 @@ describe("filterToolsByMode", () => {
       "read_file",
       "bash",
       "write_file",
-      "plan_update",
+      "plan",
       "memory_write",
       "task",
     ]);
@@ -71,7 +69,7 @@ describe("filterToolsByMode", () => {
       globTool,
       grepTool,
       lsTool,
-      planUpdateTool,
+      planTool,
       memoryWriteTool,
       readArtifactTool,
       taskTool,
@@ -82,8 +80,8 @@ describe("filterToolsByMode", () => {
     );
   });
 
-  it("chat mode never includes bash/write_file/edit_file/task/plan_update/memory_write", () => {
-    const tools = [bashTool, writeFileTool, editFileTool, taskTool, planUpdateTool, memoryWriteTool];
+  it("chat mode never includes bash/write_file/edit_file/task/plan/memory_write", () => {
+    const tools = [bashTool, writeFileTool, editFileTool, taskTool, planTool, memoryWriteTool];
     expect(filterToolNames(tools, "chat")).toEqual([]);
   });
 
@@ -94,18 +92,17 @@ describe("filterToolsByMode", () => {
     expect(filterToolNames(tools, "plan")).not.toContain("code_mode");
   });
 
-  it("start_goal and goal_status are agent-only (lean chat/plan tool tables)", () => {
-    const tools = [readFileTool, startGoalTool, goalStatusTool];
+  it("goal is agent-only (lean chat/plan tool tables)", () => {
+    const tools = [readFileTool, goalTool];
     expect(filterToolNames(tools, "agent")).toEqual(
-      expect.arrayContaining(["start_goal", "goal_status", "read_file"]),
+      expect.arrayContaining(["goal", "read_file"]),
     );
-    expect(filterToolNames(tools, "chat")).not.toContain("start_goal");
-    expect(filterToolNames(tools, "chat")).not.toContain("goal_status");
-    expect(filterToolNames(tools, "plan")).not.toContain("start_goal");
-    expect(filterToolNames(tools, "plan")).not.toContain("goal_status");
+    for (const mode of ["chat", "plan"] as const) {
+      expect(filterToolNames(tools, mode)).not.toContain("goal");
+    }
   });
 
-  it("plan mode keeps read-only + plan_update + memory_write", () => {
+  it("plan mode keeps read-only + plan + memory_write", () => {
     const tools = [
       readFileTool,
       bashTool,
@@ -114,7 +111,7 @@ describe("filterToolsByMode", () => {
       globTool,
       grepTool,
       lsTool,
-      planUpdateTool,
+      planTool,
       memoryWriteTool,
       readArtifactTool,
       taskTool,
@@ -126,7 +123,7 @@ describe("filterToolsByMode", () => {
         "grep",
         "ls",
         "memory_write",
-        "plan_update",
+        "plan",
         "read_artifact",
         "read_file",
       ].sort()
@@ -204,15 +201,13 @@ describe("mode gating is consistent with each built-in's permission tier", () =>
     globTool,
     grepTool,
     lsTool,
-    planUpdateTool,
+    planTool,
     memoryWriteTool,
     readArtifactTool,
     askUserQuestionTool,
-    planDoneTool,
     startNewTaskTool,
     suggestModeTool,
-    startGoalTool,
-    goalStatusTool,
+    goalTool,
     taskTool,
     codeModeTool,
     harnessBridgeTool,
@@ -257,21 +252,15 @@ describe("mode gating is consistent with each built-in's permission tier", () =>
     // read-tier tools are the safe baseline. Some read-tier tools are
     // nonetheless denied in chat — the permission axis (approval) and the mode
     // axis (collaboration restriction) are orthogonal:
-    //   - plan_update:  records a planning event; chat wants answers, not plans.
+    //   - plan: planning events; chat wants answers, not plans.
     //   - memory_write: writes memory files — a side effect chat policy forbids.
-    //   - task / subagent_*: spawn or control sub-agents (ALWAYS_DENIED).
-    //   - start_goal / goal_status: goal-loop tools kept agent-only for a lean
-    //     chat/plan tool table.
-    // Pin that the fall-through keeps every OTHER read tool.
+    //   - task: spawn / control sub-agents (ALWAYS_DENIED).
+    //   - goal: goal-loop tool kept agent-only.
     const CHAT_DENIED_READ = new Set([
-      "plan_update",
+      "plan",
       "memory_write",
       "task",
-      "subagent_list",
-      "subagent_wait",
-      "subagent_interrupt",
-      "start_goal",
-      "goal_status",
+      "goal",
     ]);
     const chat = new Set(filterToolNames(builtins, "chat"));
     for (const t of builtins) {
@@ -293,15 +282,15 @@ describe("filterToolsByModeFromRegistry", () => {
     const r = new ToolRegistry();
     r.register(readFileTool);
     r.register(bashTool);
-    r.register(planUpdateTool);
+    r.register(planTool);
     expect(filterToolNames(r.all(), "chat").sort()).toEqual(["read_file"]);
     expect(filterToolNames(r.all(), "plan").sort()).toEqual([
-      "plan_update",
+      "plan",
       "read_file",
     ]);
     expect(filterToolNames(r.all(), "agent").sort()).toEqual([
       "bash",
-      "plan_update",
+      "plan",
       "read_file",
     ]);
   });

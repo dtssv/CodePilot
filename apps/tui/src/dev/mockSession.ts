@@ -164,6 +164,78 @@ class MockSessionImpl implements SessionShape {
       }
     }
 
+ // 4a. Optionally demonstrate a sub-agent fan-out when the prompt mentions
+ // "agent": exercises the nested-run rows and the drill-down view in --mock.
+    if (!this.cancelled && /agent|子\s*agent/i.test(text)) {
+      const taskId = randomUUID();
+      this.emit({
+        type: "tool_call",
+        id: taskId,
+        name: "task",
+        input: {
+          objective: "Ping baidu.com 100 times and report the summary lines.",
+          agent_type: "worker",
+        },
+      });
+      this.emit({ type: "status", status: "running" });
+      await sleep(60);
+      for (let i = 0; i < 2; i++) {
+        this.emit({
+          type: "subagent",
+          parentToolCallId: taskId,
+          index: i,
+          runSeq: i + 1,
+          objective:
+            i === 0
+              ? "Ping baidu.com 100 times and report the summary lines."
+              : "Cross-check the ping output against the host's DNS settings.",
+          state: "running",
+          ts: Date.now(),
+        });
+      }
+      await sleep(60);
+      this.emit({
+        type: "subagent",
+        parentToolCallId: taskId,
+        index: 0,
+        objective: "Ping baidu.com 100 times and report the summary lines.",
+        state: "running",
+        ts: Date.now(),
+        event: {
+          type: "tool_call",
+          id: randomUUID(),
+          name: "bash",
+          input: { command: "ping -c 100 baidu.com 2>&1; echo \"EXIT_STATUS=$?\"" },
+        },
+      });
+      await sleep(60);
+      for (const index of [0, 1]) {
+        this.emit({
+          type: "subagent",
+          parentToolCallId: taskId,
+          index,
+          objective:
+            index === 0
+              ? "Ping baidu.com 100 times and report the summary lines."
+              : "Cross-check the ping output against the host's DNS settings.",
+          state: "ok",
+          ts: Date.now(),
+          event: {
+            type: "message",
+            id: randomUUID(),
+            role: "assistant",
+            content: [{ type: "text", text: `(mock) sub-agent ${index + 1} finished.` }],
+          },
+        });
+      }
+      this.emit({
+        type: "tool_result",
+        toolCallId: taskId,
+        name: "task",
+        content: "(mock) 2 sub-agents finished",
+      });
+    }
+
  // 4b. Optionally demonstrate a structured question round-trip when the
  // prompt mentions "ask" and a question bridge is available.
     if (!this.cancelled && this.questionBridge !== undefined && text.toLowerCase().includes("ask")) {

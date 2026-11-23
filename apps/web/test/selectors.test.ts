@@ -65,14 +65,14 @@ describe("groupRows", () => {
     expect(steps?.kind === "steps" && steps.tools.map((t) => t.id)).toEqual(["t1", "t2"]);
   });
 
-  it("renders only the latest plan in full and hides plan_update steps", () => {
+  it("renders only the latest plan in full and hides plan tool steps", () => {
     const plan = (status: "pending" | "completed"): Event => ({
       type: "plan",
       steps: [{ id: "1", title: "Do it", status }],
     });
     const s = play([
-      call("p1", "plan_update", { steps: [] }),
-      result("p1", "plan_update", "ok"),
+      call("p1", "plan", { action: "update", steps: [] }),
+      result("p1", "plan", "ok"),
       plan("pending"),
       assistant("a1", "working"),
       plan("completed"),
@@ -208,6 +208,16 @@ describe("derived views", () => {
     expect(toolTarget({ command: "ls   -la\n" })).toBe("ls -la");
     expect(toolTarget({ path: "src/a.ts" })).toBe("src/a.ts");
     expect(toolTarget({ x: 1 })).toBe("");
+    // grep: prefer the pattern over a search-root path so failures are readable.
+    expect(
+      toolTarget(
+        { pattern: "(?i)needle", path: "/Users/me/CodePilot" },
+        "grep",
+      ),
+    ).toBe("(?i)needle");
+    expect(toolTarget({ pattern: "(?i)needle", path: "/Users/me/CodePilot" })).toBe(
+      "/Users/me/CodePilot",
+    );
     const patch = [
       "*** Begin Patch",
       "*** Update File: src/a.ts",
@@ -222,6 +232,16 @@ describe("derived views", () => {
         patch: "*** Begin Patch\n*** Add File: n.ts\n*** End Patch",
       }),
     ).toBe("Wrote");
+    // task control actions are not "Delegated".
+    expect(toolVerb("task", { action: "wait", session_id: "sub_abc" })).toBe(
+      "Waited for subtask",
+    );
+    expect(toolVerb("task", { action: "interrupt", session_id: "sub_abc" })).toBe(
+      "Interrupted subtask",
+    );
+    expect(toolVerb("task", { action: "list" })).toBe("Listed subtasks");
+    expect(toolVerb("task", { objective: "do stuff" })).toBe("Delegated");
+    expect(toolTarget({ action: "wait", session_id: "sub_abc" }, "task")).toBe("sub_abc");
   });
 
   it("formats durations and date buckets", () => {

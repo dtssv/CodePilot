@@ -62,6 +62,13 @@ export class PermissionEngine {
   private configRules: RuleBuckets;
  /** Rules added at runtime via "always" decisions. Never persisted implicitly. */
   private sessionRules: RuleBuckets;
+ /**
+  * Session grants that cover `escalate_sandbox` bash calls. Separate from
+  * {@link sessionRules}.allow so a normal `bash(npm *)` allow (or yolo) never
+  * silently drops the jail — only an explicit "Always allow" on an escalation
+  * prompt can match here.
+  */
+  private sessionEscalationAllows: string[] = [];
  /** Active sandbox policy + cwd. Used for in-root write auto-allow and for
  * detecting out-of-root writes that need a sandbox-expand prompt.
  * `osEnforced` is true only when an OS backend actually jails bash. */
@@ -257,6 +264,28 @@ export class PermissionEngine {
     }
   }
 
+  /**
+   * Record an "Always allow" decision from a sandbox-escalation prompt. Later
+   * matching `escalate_sandbox` calls skip the hard ask floor for this session.
+   * Does not widen ordinary (sandboxed) bash allows.
+   */
+  addSessionEscalationRule(rule: string): void {
+    if (!rule.trim() || this.sessionEscalationAllows.includes(rule)) return;
+    this.sessionEscalationAllows.push(rule);
+    if (this.onRuleAdded) {
+      try {
+        this.onRuleAdded(rule, "allow");
+      } catch {
+        /* a listener must never break rule bookkeeping */
+      }
+    }
+  }
+
+  /** True when an escalated bash call matches a prior escalation Always grant. */
+  private escalationSessionAllowed(command: string, parsed: NonNullable<ReturnType<typeof parseCommand>>): boolean {
+    return bashAllowRule(this.sessionEscalationAllows, command, parsed) !== null;
+  }
+
  /** Listener fired whenever a session rule is added (via an "always" grant or a
   * CRUD hot-load). Lets the owner re-evaluate in-flight permission prompts that
   * the new rule now covers — the pending-batch unlock. At most one listener. */
@@ -336,9 +365,15 @@ export class PermissionEngine {
     if (deny) return { decision: "deny", reason: `matched deny rule "${deny}"` };
 
     // Per-command sandbox escalation (bash `escalate_sandbox: true`): run THIS
-    // one command without the OS jail. Always forces confirmation — never
-    // auto-allowed, even under yolo/allow rules. Deny (above) still wins.
-    if (bash && isSandboxEscalation(input)) return "ask";
+    // one command without the OS jail. Ordinary allow rules / yolo never cover
+    // it — only an explicit escalation session grant (Always allow on a prior
+    // 沙箱提权 prompt) can. Deny (above) still wins.
+    if (bash && isSandboxEscalation(input)) {
+      if (this.escalationSessionAllowed(primary!, bash)) {
+        return { decision: "allow", reason: "matched session escalation grant" };
+      }
+      return "ask";
+    }
 
  // Sensitive-path floor — applies even with sandbox off / yolo mode, above
  // every allow rule. A write/delete onto a system/credential path (/etc,
@@ -562,8 +597,11 @@ export class PermissionEngine {
     const bash = tool.name === "bash" && primary !== undefined ? parseCommand(primary) : undefined;
     const cwd = this.sandbox?.cwd ?? process.cwd();
 
-    // Per-command sandbox escalation is always a hard floor.
-    if (bash && isSandboxEscalation(input)) return "hard";
+    // Per-command sandbox escalation is a hard floor unless the user already
+    // Always-allowed a matching escalation pattern this session.
+    if (bash && isSandboxEscalation(input)) {
+      return this.escalationSessionAllowed(primary!, bash) ? "soft" : "hard";
+    }
 
     // Sensitive / git-metadata write floor (file tools).
     if (tool.permission === "write" && tool.name !== "bash") {
@@ -619,10 +657,12 @@ export class PermissionEngine {
           ? "memory_write (scope=user, cross-repo): durable note will apply in other projects too."
           : "memory_write (scope=project): durable note for this project only.";
     }
+    let sandboxEscalation: true | undefined;
     if (tool.name === "bash" && primary) {
       const danger = checkDangerousCommand(primary);
       if (danger.dangerous) reason += ` DANGEROUS: ${danger.why}.`;
       if (isSandboxEscalation(input)) {
+        sandboxEscalation = true;
         const why = (input as Record<string, unknown>).justification;
         reason +=
           ` SANDBOX ESCALATION: this command will run WITHOUT the OS sandbox` +
@@ -672,12 +712,18 @@ export class PermissionEngine {
       input,
       reason,
       ...(sandboxExpand ? { sandboxExpand } : {}),
+      ...(sandboxEscalation ? { sandboxEscalation } : {}),
     };
   }
 
   /**
-   * Enrich a permission request so the UI can show what a `job_id` refers to.
-   * Mutates `req` in place; safe no-op when the job is unknown.
+   * Enrich a permission request so the UI can show actionable context.
+   * Mutates `req` in place; safe no-op on failure.
+   *
+   * - job tools: resolve `job_id` → command
+   * - apply_patch: file list (+ keep patch body)
+   * - edit_file / write_file: live-disk before/after preview on `req.preview`
+   *   (a computed diff attached before the permission prompt)
    */
   async enrichForDisplay(req: PermissionRequest, cwd: string): Promise<void> {
     if (!req.input || typeof req.input !== "object") return;
@@ -694,7 +740,19 @@ export class PermissionEngine {
       if (files.length > 0) {
         req.reason = `Apply patch to ${files.length} file(s):\n${files.map((p) => `  ${p}`).join("\n")}`;
       }
-      void cwd;
+      // Patch body is already a diff; surface a truncated form as preview.
+      const body = o.patch;
+      req.preview =
+        body.length > 6_000 ? `${body.slice(0, 6_000)}\n… [patch truncated for approval]` : body;
+      return;
+    }
+
+    if (req.toolName === "edit_file") {
+      await enrichEditPreview(req, cwd, o);
+      return;
+    }
+    if (req.toolName === "write_file") {
+      await enrichWritePreview(req, cwd, o);
       return;
     }
 
@@ -755,4 +813,92 @@ export class PermissionEngine {
       path: writableRootForTarget(primary, this.sandbox.cwd),
     };
   }
+}
+
+/** Compute live-disk edit preview for the approval card (best-effort). */
+async function enrichEditPreview(
+  req: PermissionRequest,
+  cwd: string,
+  o: Record<string, unknown>,
+): Promise<void> {
+  const rel = typeof o.path === "string" ? o.path : typeof o.file_path === "string" ? o.file_path : null;
+  if (!rel) return;
+  const { readFile } = await import("node:fs/promises");
+  const { resolve: resolvePath } = await import("node:path");
+  const { applyEditsOnOriginal } = await import("../tools/edit_file.js");
+  const { stripUtf8Bom } = await import("../tools/utf8Bom.js");
+  const { previewTextDiff } = await import("../tools/previewDiff.js");
+  const abs = resolvePath(cwd, rel);
+  let raw: string;
+  try {
+    raw = await readFile(abs, "utf-8");
+  } catch (err) {
+    req.preview = `Cannot preview ${rel}: ${(err as Error).message}`;
+    return;
+  }
+  const { text: original } = stripUtf8Bom(raw);
+  const edits =
+    Array.isArray(o.edits) && o.edits.length > 0
+      ? (o.edits as Array<{
+          search: string;
+          replace: string;
+          global_replace?: boolean;
+          regex?: boolean;
+        }>).map((e) => ({
+          search: typeof e.search === "string" ? e.search : "",
+          replace: typeof e.replace === "string" ? e.replace : "",
+          global_replace: e.global_replace === true,
+          regex: e.regex === true,
+        }))
+      : [
+          {
+            search: typeof o.search === "string" ? o.search : "",
+            replace: typeof o.replace === "string" ? o.replace : "",
+            global_replace: o.global_replace === true,
+            regex: o.regex === true,
+          },
+        ];
+  if (edits.some((e) => e.search.length === 0)) {
+    req.preview = `Cannot preview: empty search`;
+    return;
+  }
+  const batch = applyEditsOnOriginal(original, edits);
+  if (!batch.ok || batch.result === undefined) {
+    req.preview =
+      `Would fail on live disk (${batch.strategy}): ${batch.message}\n` +
+      `(path: ${rel})`;
+    return;
+  }
+  req.preview = previewTextDiff(rel, original, batch.result);
+}
+
+/** Preview write_file against the live file (overwrite) or as a create. */
+async function enrichWritePreview(
+  req: PermissionRequest,
+  cwd: string,
+  o: Record<string, unknown>,
+): Promise<void> {
+  const rel = typeof o.path === "string" ? o.path : null;
+  const content = typeof o.content === "string" ? o.content : null;
+  if (!rel || content === null) return;
+  if (o.append === true) {
+    req.preview = `append → ${rel}\n${content.length > 4_000 ? `${content.slice(0, 4_000)}\n…` : content}`;
+    return;
+  }
+  const { readFile } = await import("node:fs/promises");
+  const { resolve: resolvePath } = await import("node:path");
+  const { previewTextDiff } = await import("../tools/previewDiff.js");
+  const abs = resolvePath(cwd, rel);
+  let prev: string | null = null;
+  try {
+    prev = await readFile(abs, "utf-8");
+  } catch {
+    prev = null;
+  }
+  if (prev === null) {
+    const body = content.length > 4_000 ? `${content.slice(0, 4_000)}\n…` : content;
+    req.preview = `create ${rel}\n${body}`;
+    return;
+  }
+  req.preview = previewTextDiff(rel, prev, content);
 }

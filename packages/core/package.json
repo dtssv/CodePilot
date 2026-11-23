@@ -10,6 +10,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./reasoning": {
+      "types": "./dist/config/reasoningEffort.d.ts",
+      "import": "./dist/config/reasoningEffort.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -26,14 +30,19 @@
     "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
+    "@joplin/turndown-plugin-gfm": "^1.0.71",
+    "@vscode/ripgrep": "^1.18.0",
     "better-sqlite3": "^12.4.1",
     "gpt-tokenizer": "^4.1.2",
+    "node-pty": "^1.1.0",
+    "turndown": "^7.2.5",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.10.0",
+    "@types/turndown": "^5.0.6",
     "@vitest/coverage-v8": "^2.1.8",
     "typescript": "^5.6.3",
     "vitest": "^2.1.8"

@@ -73,7 +73,7 @@ describe("readLayeredProjectMemory", () => {
   });
 
   it("reads a CLAUDE.md-only repo", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "mem-claude-"));
+    const dir = mkdtempSync(join(tmpdir(), "mem-compat-"));
     initRepo(dir);
     writeFileSync(join(dir, "CLAUDE.md"), "claude convention", "utf-8");
     const out = await readLayeredProjectMemory(dir);

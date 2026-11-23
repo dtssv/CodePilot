@@ -10,6 +10,7 @@ import {
   compressedSessionPath,
   cwdSidecarPath,
   historyArchivePath,
+  inboxSidecarPath,
   normalizeCwd,
   sessionPath,
   stateSidecarPath,
@@ -237,6 +238,7 @@ export async function deleteSession(
     cwdSidecarPath(id),
     stateSidecarPath(id),
     historyArchivePath(id),
+    inboxSidecarPath(id),
     sessionLockPath(id),
   ]) {
     try {

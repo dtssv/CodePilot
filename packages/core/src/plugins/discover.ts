@@ -85,22 +85,36 @@ export async function trustPlugin(
 ): Promise<boolean> {
   const p = (await discoverPlugins(cwd)).get(name);
   if (!p) return false;
-  await store.record(name, pluginContentHash(p.manifest));
+  await store.record(name, pluginContentHash(p.manifest, p.path));
   return true;
 }
 
 /**
  * Collect resource directories from discovered plugins (project before user).
  * Pass to `discoverSkills`/`discoverCustomAgents`/`discoverSlashCommands`
- * as `extraDirs`.
+ * as `extraDirs`. Untrusted plugins (content drift / unapproved project) are
+ * skipped the same way hooks/MCP/runtime are gated in {@link mergePluginConfig}.
  */
 export function pluginResourcePaths(
-  plugins: Map<string, Plugin>
+  plugins: Map<string, Plugin>,
+  onWarn: (message: string) => void = () => {},
+  trust?: PluginTrustGate,
 ): { skills: string[]; agents: string[]; commands: string[] } {
   const skills: string[] = [];
   const agents: string[] = [];
   const commands: string[] = [];
+  const warned = new Set<string>();
   for (const p of plugins.values()) {
+    if (trust) {
+      const ok = pluginSensitiveTrusted(p, trust);
+      if (!ok) {
+        if (!warned.has(p.manifest.name)) {
+          warned.add(p.manifest.name);
+          onWarn(untrustedPluginMessage(p, trust));
+        }
+        continue;
+      }
+    }
     if (existsSync(p.paths.skills)) skills.push(p.paths.skills);
     if (existsSync(p.paths.agents)) agents.push(p.paths.agents);
     if (existsSync(p.paths.commands)) commands.push(p.paths.commands);
@@ -187,7 +201,11 @@ export function mergePluginConfig(
     }
   }
   if (hooksChanged) merged.hooks = hooks;
- // Merge MCP servers (gated by the "mcp" permission).
+ // Merge MCP servers (gated by the "mcp" permission). User-declared names win;
+ // plugins may only add servers the user/config did not already define.
+  const userMcpKeys = new Set(
+    Object.keys((merged.mcpServers as Record<string, unknown> | undefined) ?? {}),
+  );
   const mcpServers = { ...(merged.mcpServers as Record<string, unknown> ?? {}) };
   let mcpChanged = false;
   for (const p of plugins.values()) {
@@ -198,6 +216,12 @@ export function mergePluginConfig(
     }
     if (!contentTrusted(p)) continue;
     for (const [name, cfg] of Object.entries(p.manifest.mcpServers)) {
+      if (userMcpKeys.has(name)) {
+        onWarn(
+          `plugin "${p.manifest.name}" MCP server "${name}" skipped — user/config already defines that name`,
+        );
+        continue;
+      }
       mcpServers[name] = cfg;
       mcpChanged = true;
     }

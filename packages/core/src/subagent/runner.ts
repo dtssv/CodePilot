@@ -9,6 +9,7 @@ import { trimEventsToBudget } from "../compaction/compaction.js";
 import type { CodepilotConfig, Event, UsageInfo } from "../types.js";
 import { ToolRegistry } from "../tools/types.js";
 import { ArtifactStore } from "../tools/artifacts.js";
+import { narrowSubagentTools } from "../tools/subagentTools.js";
 import { PermissionEngine } from "../permissions/permissions.js";
 import { buildProvider } from "../session/session-utils.js";
 import { buildSystemPrompt } from "../systemPrompt/index.js";
@@ -177,7 +178,9 @@ export function createSubagentRunner(
         opts.model;
       // Unset = unlimited (doom-loop / cancel / timeout still apply). Only cap
       // when the parent `task` call or custom-agent frontmatter sets a value.
-      const effectiveMaxSteps = maxSteps ?? custom?.maxTurns;
+      // Default turn budget so explore/worker cannot run unbounded.
+      const DEFAULT_SUBAGENT_MAX_STEPS = 40;
+      const effectiveMaxSteps = maxSteps ?? custom?.maxTurns ?? DEFAULT_SUBAGENT_MAX_STEPS;
 
  // Filesystem isolation: when `isolation === "worktree"`, run the sub-agent
  // in a linked git worktree on a fresh branch. Falls back to the parent cwd
@@ -325,15 +328,12 @@ export function createSubagentRunner(
         }
         toolRegistry = filtered;
       }
- // Optional restriction by tool name (from the `task` call).
-      let restricted = toolRegistry;
-      if (tools && tools.length > 0) {
-        restricted = new ToolRegistry();
-        for (const n of tools) {
-          const t = toolRegistry.get(n);
-          if (t) restricted.register(t);
-        }
-      }
+ // Optional restriction by tool name (from the `task` call). Pool-out names
+      // are dropped (not thrown) so a parent model that lists `bash` on explore
+      // still runs with the in-pool subset instead of failing the whole fan-out.
+      const narrowed = narrowSubagentTools(toolRegistry, tools);
+      const restricted = narrowed.registry;
+      const droppedTools = narrowed.dropped;
       // Prefer the parent's store so worktree sub-agents' art_* refs stay
       // readable after the child ends. Fall back to a cwd-local store when the
       // host did not wire one (tests / standalone runners).
@@ -354,11 +354,11 @@ export function createSubagentRunner(
  // what it reads.
       const memory: MemoryContents =
         omitMemory || isPlan ? {} : summariseMemory(await readMemory(cwd));
- // Workers that can mutate files need the repo's rules (test commands,
- // conventions). Explore/plan stay lean. A tools-narrowed worker with no
- // file mutators (e.g. bash-only network probes) skips AGENTS.md — peer
- // design: don't pay ~7k project instructions when the tool surface can't
- // use them. Full worker pool still injects.
+      // Workers that can mutate files need the repo's rules (test commands,
+      // conventions). Explore/plan stay lean. A tools-narrowed worker with no
+      // file mutators (e.g. bash-only network probes) skips AGENTS.md: don't
+      // pay ~7k project instructions when the tool surface cannot use them.
+      // Full worker pool still injects.
       const FILE_MUTATORS = ["edit_file", "write_file", "apply_patch", "notebook_edit"] as const;
       const canMutateFiles = FILE_MUTATORS.some((n) => restricted.get(n) !== undefined);
       if (!omitMemory && !isPlan && effectiveType === "worker" && canMutateFiles) {
@@ -407,8 +407,8 @@ export function createSubagentRunner(
           : SUBAGENT_OBJECTIVE_FOOTER;
       // A resumed sub-agent already knows its role and prior context: send the
       // bare follow-up (no task/footer preamble). A fresh run gets the task text
-      // + conclusion-format footer (no "OBJECTIVE:" label — peers send bare
-      // delegation text; system prompt already names the task conceptually).
+      // + conclusion-format footer (no "OBJECTIVE:" label — the system prompt
+      // already names the task conceptually).
       const initialText = resuming
         ? (continueText ?? objective)
         : `${objective}\n\n${footer}`;
@@ -673,6 +673,14 @@ export function createSubagentRunner(
           `\n\n[turn budget reached: ${effectiveMaxSteps}` +
           (outcome.steps > 0 ? `, ${outcome.steps} tool step(s)` : "") +
           `. Parent: resume with continue_session_id if more work is needed; do not re-dispatch the same objective.]`;
+      }
+      if (droppedTools.length > 0) {
+        const poolHint =
+          effectiveType === "worker"
+            ? "not in this agent_type pool"
+            : "not in explore/plan pool (read-only; use agent_type:worker for bash/writes)";
+        finalText =
+          `Note: dropped tools ${poolHint}: ${droppedTools.join(", ")}.\n\n` + finalText;
       }
       return {
         conclusion: finalText,

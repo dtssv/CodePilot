@@ -34,9 +34,6 @@ export function RemoteSection({
               <div className="text-[13px] font-medium text-[var(--color-ink)]">
                 {t("Workspaces to authorize")}
               </div>
-              <div className="mt-0.5 text-[11.5px] leading-4 text-[var(--color-ink-faint)]">
-                {t("The phone sees exactly the workspaces you tick. The active one is always included.")}
-              </div>
               <div className="mt-2 max-h-40 space-y-1 overflow-auto">
                 {cp.workspaces.map((ws) => {
                   const isActive = ws === state.cwd;
@@ -76,9 +73,6 @@ export function RemoteSection({
           {qr && (
             <div className="flex flex-col items-center rounded-xl border border-[var(--color-edge)] bg-[var(--color-surface-raised)] p-4">
               <img src={qr.qrDataUrl} alt="QR" className="h-[200px] w-[200px] rounded-lg bg-white p-2" />
-              <p className="mt-2 text-center text-[11.5px] text-[var(--color-ink-dim)]">
-                {t("Scan the QR with your phone — one-time only.")}
-              </p>
               <div className="mt-2 text-[12px] text-[var(--color-ink)]">
                 {t("Code")}: <span className="font-mono">{qr.code}</span>
               </div>

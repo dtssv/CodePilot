@@ -4,14 +4,19 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { homedir } from "node:os";
-import { join, relative, resolve, dirname } from "node:path";
+import { join, relative, resolve, dirname, sep, isAbsolute } from "node:path";
 import {
   discoverSlashCommands,
   discoverSkills,
   discoverPlugins,
   pluginResourcePaths,
   sharedBuiltinCommands,
+  listMcpPromptSlashCommands,
+  expandMcpPromptCommand,
+  renderCommandPrompt,
+  findSlashCommand,
   type Session,
+  type SlashCommand,
 } from "@codepilot/core";
 import { parseReference } from "../../paths.js";
 import { ErrorCode, RpcError } from "../../rpc.js";
@@ -24,6 +29,8 @@ import {
 } from "../context.js";
 import type {
   CommandInfoRpc,
+  CommandsExpandParams,
+  CommandsExpandResult,
   CommandsListParams,
   CommandsListResult,
   CompletionCandidate,
@@ -410,10 +417,95 @@ export async function handleCommandsList(
       });
     }
     warnings.push(...discovered.warnings);
+    // MCP prompts as dynamic slash commands (live from a session's manager).
+    const taken = new Set(commands.map((c) => c.name.toLowerCase()));
+    const session = liveSessionForCwd(ctx, cwd);
+    const mcpCmds = listMcpPromptSlashCommands(session?.getMcpManager?.() ?? null, {
+      takenNames: taken,
+      onWarn: (msg) => warnings.push(msg),
+    });
+    for (const c of mcpCmds) {
+      commands.push({
+        name: c.name,
+        description: c.description,
+        argumentHint: c.argumentHint,
+        source: "mcp",
+        kind: "prompt",
+      });
+    }
   } catch (err) {
     warnings.push(`slash-command discovery failed: ${err instanceof Error ? err.message : String(err)}`);
   }
   return { commands, warnings };
+}
+
+/** Discover markdown + MCP prompt slash commands for a cwd (shared by list/expand). */
+async function discoverAllPromptCommands(
+  ctx: ServerContext,
+  cwd: string,
+): Promise<{ commands: SlashCommand[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  const reserved = new Set(sharedBuiltinCommands().map((c) => c.name));
+  let extraDirs: string[] = [];
+  try {
+    const plugins = await discoverPlugins(cwd);
+    extraDirs = pluginResourcePaths(plugins).commands;
+  } catch {
+    /* best-effort */
+  }
+  const discovered = await discoverSlashCommands(cwd, { reservedNames: reserved, extraDirs });
+  warnings.push(...discovered.warnings);
+  const taken = new Set([
+    ...reserved,
+    ...discovered.commands.map((c) => c.name.toLowerCase()),
+  ]);
+  const session = liveSessionForCwd(ctx, cwd);
+  const mcpCmds = listMcpPromptSlashCommands(session?.getMcpManager?.() ?? null, {
+    takenNames: taken,
+    onWarn: (msg) => warnings.push(msg),
+  });
+  return { commands: [...discovered.commands, ...mcpCmds], warnings };
+}
+
+/** Expand a prompt-kind slash command into user-turn text (markdown or MCP). */
+export async function handleCommandsExpand(
+  ctx: ServerContext,
+  params: CommandsExpandParams,
+): Promise<CommandsExpandResult> {
+  assertInitialized(ctx);
+  assertCwdInGrantScope(ctx, params?.cwd);
+  const cwd = params?.cwd?.trim() ? resolve(params.cwd) : resolve(ctx.defaultCwd);
+  const name = (params.name ?? "").trim().replace(/^\//, "");
+  if (!name) {
+    throw new RpcError(ErrorCode.InvalidParams, "commands/expand requires name");
+  }
+  const { commands } = await discoverAllPromptCommands(ctx, cwd);
+  const cmd = findSlashCommand(commands, name);
+  if (!cmd) {
+    throw new RpcError(ErrorCode.InvalidParams, `unknown command: /${name}`);
+  }
+  const args = (params.args ?? "").trim();
+  if (cmd.argumentHint && args.length === 0) {
+    throw new RpcError(
+      ErrorCode.InvalidParams,
+      `Usage: /${cmd.name} ${cmd.argumentHint}`,
+    );
+  }
+  if (cmd.mcpPrompt) {
+    const session = liveSessionForCwd(ctx, cwd);
+    const mcp = session?.getMcpManager?.() ?? null;
+    if (!mcp) {
+      throw new RpcError(ErrorCode.InvalidRequest, "MCP not ready — cannot expand prompt command");
+    }
+    const prompt = await expandMcpPromptCommand(cmd, args, mcp);
+    return { prompt, source: "mcp", model: cmd.model, allowedTools: cmd.allowedTools };
+  }
+  return {
+    prompt: renderCommandPrompt(cmd, args),
+    source: cmd.source,
+    model: cmd.model,
+    allowedTools: cmd.allowedTools,
+  };
 }
 
 /** First live session whose cwd matches (for MCP resource listing). Falls back
@@ -449,6 +541,150 @@ const COMPLETION_IGNORE_DIRS = new Set([
   ".gradle",
 ]);
 
+/** Split `@file:` query into a directory prefix (browse scope) and basename filter.
+ * Empty query or a trailing `/` → scoped child listing; bare fragment → fuzzy walk. */
+export function splitCompletionPathQuery(query: string): {
+  dirPrefix: string;
+  base: string;
+  scoped: boolean;
+} {
+  const norm = query.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!norm || norm === "/") return { dirPrefix: "", base: "", scoped: true };
+  const slash = norm.lastIndexOf("/");
+  if (slash < 0) return { dirPrefix: "", base: norm, scoped: false };
+  return {
+    dirPrefix: norm.slice(0, slash + 1),
+    base: norm.slice(slash + 1),
+    scoped: true,
+  };
+}
+
+function pathUnderCwd(cwd: string, abs: string): boolean {
+  const rel = relative(cwd, abs);
+  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+}
+
+/** Immediate children of `cwd/dirPrefix`, filtered by basename, dirs first. */
+async function listScopedCompletionChildren(
+  cwd: string,
+  dirPrefix: string,
+  baseFilter: string,
+  opts: { wantFile: boolean; wantDir: boolean; /** When browsing @file, still emit dirs for drill-in. */ includeDirsForBrowse: boolean },
+  max: number,
+): Promise<{ hits: CompletionCandidate[]; truncated: boolean }> {
+  const target = dirPrefix ? resolve(cwd, dirPrefix) : cwd;
+  if (!pathUnderCwd(cwd, target)) return { hits: [], truncated: false };
+  let names: string[];
+  try {
+    names = await readdir(target);
+  } catch {
+    return { hits: [], truncated: false };
+  }
+  const bl = baseFilter.toLowerCase();
+  const rows: Array<{ rel: string; dir: boolean; name: string }> = [];
+  for (const name of names) {
+    if (COMPLETION_IGNORE_DIRS.has(name)) continue;
+    if (name.startsWith(".") && !bl.startsWith(".")) continue;
+    if (bl && !name.toLowerCase().includes(bl)) continue;
+    const abs = join(target, name);
+    let info: Awaited<ReturnType<typeof stat>>;
+    try {
+      info = await stat(abs);
+    } catch {
+      continue;
+    }
+    const isDir = info.isDirectory();
+    if (isDir) {
+      if (!opts.wantDir && !opts.includeDirsForBrowse) continue;
+    } else if (!opts.wantFile) {
+      continue;
+    }
+    const rel = relative(cwd, abs).replace(/\\/g, "/");
+    rows.push({ rel, dir: isDir, name });
+  }
+  rows.sort((a, b) => {
+    if (a.dir !== b.dir) return a.dir ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+  const truncated = rows.length > max;
+  const hits = rows.slice(0, max).map((r) => {
+    if (r.dir) {
+      const value = r.rel.endsWith("/") ? r.rel : `${r.rel}/`;
+      return {
+        kind: "dir" as const,
+        value,
+        label: value,
+        detail: "directory",
+      };
+    }
+    return { kind: "file" as const, value: r.rel, label: r.rel };
+  });
+  return { hits, truncated };
+}
+
+/** Fuzzy path walk when the user typed a bare fragment (no `/`). */
+async function fuzzyCompletionWalk(
+  cwd: string,
+  ql: string,
+  opts: { wantFile: boolean; wantDir: boolean; includeDirsForBrowse: boolean },
+  max: number,
+): Promise<{ hits: CompletionCandidate[]; truncated: boolean }> {
+  const hits: Array<{ rel: string; dir: boolean; score: number }> = [];
+  let visited = 0;
+  let more = false;
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (visited > 4000 || depth > 8) return;
+    let names: string[];
+    try {
+      names = await readdir(dir);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (COMPLETION_IGNORE_DIRS.has(name)) continue;
+      if (name.startsWith(".") && !ql.startsWith(".")) continue;
+      visited++;
+      const abs = join(dir, name);
+      let info: Awaited<ReturnType<typeof stat>>;
+      try {
+        info = await stat(abs);
+      } catch {
+        continue;
+      }
+      const rel = relative(cwd, abs).replace(/\\/g, "/");
+      const rell = rel.toLowerCase();
+      const isDir = info.isDirectory();
+      const allowDir = isDir && (opts.wantDir || opts.includeDirsForBrowse);
+      const allowFile = !isDir && opts.wantFile;
+      if (allowDir || allowFile) {
+        if (!ql || rell.includes(ql) || name.toLowerCase().includes(ql)) {
+          const base = name.toLowerCase();
+          const score =
+            (base === ql ? 0 : base.startsWith(ql) ? 1 : base.includes(ql) ? 2 : 3) * 100 +
+            rel.split(/[/\\]/).length;
+          hits.push({ rel, dir: isDir, score });
+        }
+      }
+      if (isDir) await walk(abs, depth + 1);
+      if (hits.length > max * 8) {
+        more = true;
+        return;
+      }
+    }
+  };
+  await walk(cwd, 0);
+  hits.sort((a, b) => a.score - b.score || a.rel.length - b.rel.length);
+  more = more || hits.length > max;
+  const slice = hits.slice(0, max).map((h) => {
+    if (h.dir) {
+      const value = h.rel.endsWith("/") ? h.rel : `${h.rel}/`;
+      return { kind: "dir" as const, value, label: value, detail: "directory" };
+    }
+    return { kind: "file" as const, value: h.rel, label: h.rel };
+  });
+  return { hits: slice, truncated: more };
+}
+
 /** Unified `@`-mention completion: server ranks candidates across kinds
  * (file/dir/mcp/git/skill); the inserted `value` is a token the agent
  * resolves at prompt time (server does not inline content). */
@@ -461,61 +697,24 @@ export async function handleWorkspaceComplete(
   const cwd = params.cwd?.trim() ? resolve(params.cwd) : resolve(ctx.defaultCwd);
   const query = (params.query ?? "").trim();
   const ql = query.toLowerCase();
-  const max = Math.min(Math.max(params.maxResults ?? 20, 1), 100);
+  // Small default: completeness comes from path-scoped browse + typing, not a long dump.
+  const max = Math.min(Math.max(params.maxResults ?? 40, 1), 100);
   const kinds = new Set<CompletionKind>(params.kinds ?? ["file", "dir", "mcp", "git", "skill"]);
   const out: CompletionCandidate[] = [];
+  let truncated = false;
 
-  // --- files + dirs: shallow ranked walk, honouring the query as a fuzzy-ish
-  // substring on the relative path. Bounded so a huge repo can't stall.
+  // --- files + dirs: path-scoped child listing when empty or `dir/…`; else fuzzy.
   if (kinds.has("file") || kinds.has("dir")) {
-    const hits: Array<{ rel: string; dir: boolean; score: number }> = [];
-    let visited = 0;
-    const walk = async (dir: string, depth: number): Promise<void> => {
-      if (visited > 4000 || depth > 8) return;
-      let names: string[];
-      try {
-        names = await readdir(dir);
-      } catch {
-        return;
-      }
-      for (const name of names) {
-        if (COMPLETION_IGNORE_DIRS.has(name)) continue;
-        if (name.startsWith(".") && !ql.startsWith(".")) continue;
-        visited++;
-        const abs = join(dir, name);
-        let info: Awaited<ReturnType<typeof stat>>;
-        try {
-          info = await stat(abs);
-        } catch {
-          continue;
-        }
-        const rel = relative(cwd, abs);
-        const rell = rel.toLowerCase();
-        const isDir = info.isDirectory();
-        if ((isDir && kinds.has("dir")) || (!isDir && kinds.has("file"))) {
-          if (!ql || rell.includes(ql) || name.toLowerCase().includes(ql)) {
-            // Prefer basename matches and shallower paths.
-            const base = name.toLowerCase();
-            const score =
-              (base === ql ? 0 : base.startsWith(ql) ? 1 : base.includes(ql) ? 2 : 3) * 100 +
-              rel.split(/[/\\]/).length;
-            hits.push({ rel, dir: isDir, score });
-          }
-        }
-        if (isDir) await walk(abs, depth + 1);
-        if (hits.length > max * 8) break;
-      }
-    };
-    await walk(cwd, 0);
-    hits.sort((a, b) => a.score - b.score || a.rel.length - b.rel.length);
-    for (const h of hits.slice(0, max)) {
-      out.push({
-        kind: h.dir ? "dir" : "file",
-        value: h.rel,
-        label: h.rel,
-        detail: h.dir ? "directory" : undefined,
-      });
-    }
+    const wantFile = kinds.has("file");
+    const wantDir = kinds.has("dir");
+    // @file: still returns directories so the menu can drill in with keepOpen.
+    const includeDirsForBrowse = wantFile;
+    const { dirPrefix, base, scoped } = splitCompletionPathQuery(query);
+    const fileHits = scoped
+      ? await listScopedCompletionChildren(cwd, dirPrefix, base, { wantFile, wantDir, includeDirsForBrowse }, max)
+      : await fuzzyCompletionWalk(cwd, ql, { wantFile, wantDir, includeDirsForBrowse }, max);
+    out.push(...fileHits.hits);
+    truncated = truncated || fileHits.truncated;
   }
 
   // --- MCP resources from a live session's manager (if any).
@@ -575,7 +774,8 @@ export async function handleWorkspaceComplete(
     }
   }
 
-  return { candidates: out.slice(0, max) };
+  if (out.length > max) truncated = true;
+  return { candidates: out.slice(0, max), truncated };
 }
 
 export async function handleWorkspaceStat(

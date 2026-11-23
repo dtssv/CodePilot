@@ -1,6 +1,6 @@
 // File-observation store: staleness guard for *blind* full-file replaces.
 // Surgical tools (edit_file / apply_patch Update) do NOT consult this store —
-// they gate on patch/`old_string` matching live disk (peer Edit/StrReplace).
+// they gate on patch/`old_string` matching live disk instead.
 // Blind tools (write_file overwrite, notebook_edit) call checkFresh: when a
 // path was observed, refuse if mtime/size drifted (unless content hash matches);
 // `requireObserved` hard-gates notebook cell-index edits that have no content match.
@@ -31,6 +31,9 @@ export function hashFileContent(buf: Buffer): string {
   return `s:${h.digest("hex")}`;
 }
 
+/** Line window last returned by `read_file` (defaults applied by the tool). */
+export type ReadWindow = { startLine: number; maxLines: number };
+
 export interface FileObservation {
   /** Absolute, resolved path. */
   path: string;
@@ -42,6 +45,8 @@ export interface FileObservation {
    * supplied it. Used only to rescue a false-positive mtime; absent on older
    * observations, in which case the mtime/size decision stands. */
   contentHash?: string;
+  /** Last `read_file` window for this path (used by the unchanged stub). */
+  readWindow?: ReadWindow;
   /** Wall-clock of the observation (for diagnostics only). */
   observedAt: number;
 }
@@ -63,7 +68,7 @@ export interface CheckFreshOptions {
   /**
    * When true, refuse existing files that were never observed this session.
    * Default false — context-match tools (apply_patch / edit_file) validate
-   * against live disk instead .
+   * against live disk instead.
    */
   requireObserved?: boolean;
 }
@@ -73,19 +78,43 @@ export class FileObservationStore {
 
   /** Record that `absPath` was just read, using a fresh stat. An optional
    * `contentHash` (from hashFileContent on the bytes just read) enables the
-   * content-equality fallback in checkFresh. */
+   * content-equality fallback in checkFresh. Optional `readWindow` enables
+   * the `read_file` unchanged stub for the same path+window. */
   observe(
     absPath: string,
     stat: Pick<Stats, "mtimeMs" | "size">,
     contentHash?: string,
+    readWindow?: ReadWindow,
   ): void {
     this.observations.set(absPath, {
       path: absPath,
       mtimeMs: stat.mtimeMs,
       size: stat.size,
       contentHash,
+      ...(readWindow ? { readWindow } : {}),
       observedAt: Date.now(),
     });
+  }
+
+  /**
+   * True when this path was previously read with the same line window and the
+   * on-disk mtime/size still match — `read_file` can return a short stub.
+   */
+  isUnchangedRead(
+    absPath: string,
+    window: ReadWindow,
+    currentStat: Pick<Stats, "mtimeMs" | "size">,
+  ): boolean {
+    const obs = this.observations.get(absPath);
+    if (!obs?.readWindow) return false;
+    if (
+      obs.readWindow.startLine !== window.startLine ||
+      obs.readWindow.maxLines !== window.maxLines
+    ) {
+      return false;
+    }
+    const mtimeOk = Math.abs(currentStat.mtimeMs - obs.mtimeMs) <= 1;
+    return mtimeOk && currentStat.size === obs.size;
   }
 
   /** Whether `absPath` has been observed (read) this session. */
@@ -96,9 +125,8 @@ export class FileObservationStore {
   /**
    * Assert a write/edit to `absPath` is safe against a prior observation.
    * New file → allowed. Never observed → allowed unless `requireObserved`
-   * (patch/`old_string` mismatch is the real gate for surgical edits).
-   * Observed + mtime/size mismatch → "stale" unless a matching
-   * `currentContentHash` proves bytes unchanged (false-positive mtime).
+   * (full overwrite paths such as write_file). Observed + mtime/size mismatch
+   * → "stale" unless a matching `currentContentHash` proves bytes unchanged.
    */
   checkFresh(
     absPath: string,

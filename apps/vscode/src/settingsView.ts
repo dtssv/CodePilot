@@ -8,13 +8,17 @@ import { existsSync, readFileSync } from "node:fs";
 import * as vscode from "vscode";
 
 import type { Engine } from "./engine.js";
-import { injectCsp, themeOf } from "./sidebar.js";
+import { hostBootScript, injectCsp, themeOf } from "./sidebar.js";
 import { nls } from "./nls.js";
+import { readPanelPosition } from "./panelPosition.js";
+import { loadUiPrefs, mergeUiPrefs, type UiPrefs } from "./uiPrefs.js";
 
 export interface SettingsViewOptions {
   engine: Engine;
   cwd(): string;
   folders(): string[];
+  /** Broadcast UI prefs to every CodePilot webview (chat + Settings). */
+  onUiPrefs?(prefs: UiPrefs): void;
   log?(line: string): void;
 }
 
@@ -101,19 +105,22 @@ export class SettingsView {
           });
         }
         return;
-      case "ready":
+      case "ready": {
+        const prefs: UiPrefs = { ...loadUiPrefs(this.ctx), panelPosition: readPanelPosition() };
         this.post({
           type: "host/init",
           cwd: this.opts.cwd(),
           folders: this.opts.folders(),
           theme: themeOf(vscode.window.activeColorTheme?.kind),
-          locale: vscode.env?.language,
+          locale: prefs.locale ?? vscode.env?.language,
           surface: "vscode",
+          prefs,
         });
         this.ensureEngine();
         // Open the Settings sheet once the page is connected.
         this.post({ type: "host/openSettings" });
         return;
+      }
       case "restart":
         this.opts.engine.stop();
         this.ensureEngine();
@@ -124,9 +131,20 @@ export class SettingsView {
       case "openSettings":
         this.post({ type: "host/openSettings" });
         return;
+      case "prefs/set":
+        if (msg.prefs && typeof msg.prefs === "object") {
+          const merged = mergeUiPrefs(this.ctx, msg.prefs);
+          this.opts.onUiPrefs?.(merged);
+        }
+        return;
       default:
         return;
     }
+  }
+
+  /** Apply prefs from the extension host / sibling chat webview. */
+  applyUiPrefs(prefs: UiPrefs): void {
+    this.post({ type: "host/prefs", prefs });
   }
 
   private ensureEngine(): void {
@@ -164,15 +182,16 @@ export class SettingsView {
         <p>UI not built — run web + vscode build.</p>
       </body></html>`;
     }
-    const boot = `<script>window.__codepilotHost=${JSON.stringify({
+    const nonce = randomBytes(16).toString("base64");
+    const boot = hostBootScript(nonce, {
       kind: "vscode",
       locale: vscode.env.language || "en",
       theme: themeOf(vscode.window.activeColorTheme?.kind),
       view: "settings",
-    })};</script>`;
+    });
     let html = readFileSync(file, "utf8");
     html = html.replace("<head>", `<head>\n${boot}`);
-    return injectCsp(html, cspSource, randomBytes(16).toString("base64"));
+    return injectCsp(html, cspSource, nonce);
   }
 }
 
@@ -181,4 +200,5 @@ type FromWebview =
   | { type: "ready" }
   | { type: "restart" }
   | { type: "openSettings" }
-  | { type: "closeSettings" };
+  | { type: "closeSettings" }
+  | { type: "prefs/set"; prefs: UiPrefs };

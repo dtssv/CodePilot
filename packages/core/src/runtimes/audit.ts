@@ -63,7 +63,7 @@ export function missingAuditSections(report: string): string[] {
 export interface AuditRuntimeOptions {
  /**
  * Collaboration mode the audit runs in. Default `"chat"` (read-only baseline);
- * `"plan"` also allows `plan_update`/`memory_write` to leave notes. `"agent"`
+ * `"plan"` also allows `plan`/`memory_write` to leave notes. `"agent"`
  * is rejected — it would defeat the runtime's read-only guarantee.
  */
   mode?: Exclude<AgentMode, "agent">;

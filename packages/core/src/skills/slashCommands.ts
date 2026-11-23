@@ -26,15 +26,17 @@ export interface SlashCommand {
   allowedTools?: string[];
  /** Optional model override for this turn ("inherit" keeps the session model). */
   model?: string;
- /** Absolute path to the .md file on disk. */
+ /** Absolute path to the .md file on disk. Empty for synthetic MCP prompts. */
   path: string;
  /** Which source this command came from. */
   source: SlashCommandSource;
  /** Full markdown body (frontmatter stripped). Used as the prompt template. */
   body: string;
+ /** When set, this command expands via MCP `prompts/get` instead of a body. */
+  mcpPrompt?: { server: string; name: string };
 }
 
-export type SlashCommandSource = "project" | "user" | "builtin" | "plugin";
+export type SlashCommandSource = "project" | "user" | "builtin" | "plugin" | "mcp";
 
 export interface DiscoverSlashCommandsOptions {
  /** Override the project-local commands directory
@@ -303,6 +305,7 @@ export async function discoverSlashCommands(
     user: 1,
     builtin: 2,
     plugin: 3,
+    mcp: 4,
   };
   collected.sort((a, b) => {
     const pa = priority[a.source] - priority[b.source];

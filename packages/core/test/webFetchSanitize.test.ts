@@ -29,10 +29,15 @@ describe("web_fetch treats page text as untrusted", () => {
   });
 
   it("strips invisible tag / zero-width / bidi characters and keeps visible text", async () => {
-    const ctx = { cwd, config: {}, artifact: async () => "art" } as never;
+    const ctx = {
+      cwd,
+      config: { webFetch: { allowLocal: true } },
+      artifact: async () => "art",
+    } as never;
     const res = (await webFetchTool.execute({ url, no_cache: true } as never, ctx)) as { content: string; isError?: boolean };
     expect(res.isError).toBe(false);
     expect(res.content).toContain("visible 文本 ✅ text end");
     expect(res.content).not.toMatch(/[\u{E0000}-\u{E007F}\u200b\u202e]/u);
+    expect(res.content).toContain("EXTERNAL WEB CONTENT");
   });
 });

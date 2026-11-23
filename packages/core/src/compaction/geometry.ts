@@ -6,6 +6,7 @@ import type {
 } from "../types.js";
 import type { ChatProvider } from "../providers/types.js";
 import { estimateTokens as defaultTokenEstimator, IMAGE_TOKEN_ESTIMATE } from "./tokens.js";
+import { truncateToolCallInput } from "./toolInput.js";
 
 export interface CompactionOptions {
  /** Trigger compaction when total estimated tokens >= this. */
@@ -138,16 +139,27 @@ export function estimateEventTokens(
 function serializeEventForEstimate(e: Event): string {
   switch (e.type) {
     case "message":
+      // Match the send path: reasoning is persisted for UI/audit only, never
+      // counted in compaction pressure (counting it inflated estimates ~2×).
       return e.content
-        .map((b) =>
-          b.type === "text" || b.type === "reasoning" ? b.text : JSON.stringify(b),
-        )
+        .map((b) => {
+          if (b.type === "text") return b.text;
+          if (b.type === "reasoning") return "";
+          if (b.type === "tool_use") {
+            return JSON.stringify({
+              ...b,
+              input: truncateToolCallInput(b.input),
+            });
+          }
+          return JSON.stringify(b);
+        })
         .join("\n");
     case "message_delta":
-      if (e.delta.type === "text" || e.delta.type === "reasoning") return e.delta.text;
+      if (e.delta.type === "reasoning") return "";
+      if (e.delta.type === "text") return e.delta.text;
       return e.delta.partialJson;
     case "tool_call":
-      return JSON.stringify(e.input ?? {});
+      return JSON.stringify(truncateToolCallInput(e.input ?? {}));
     case "tool_result":
       return e.content;
     case "plan":
@@ -201,12 +213,32 @@ function serializeEventForEstimate(e: Event): string {
   }
 }
 
-/** Decide whether a usage update means compaction should run.
- * Trigger a bit before the hard window so the next request does not
- * overshoot (local char/4 estimates lag gateway tokenizers). */
+/** Whether a usage update should trigger compaction. Fires a bit before the
+ * hard window so the next request does not overshoot.
+ *
+ * `window` is the model context window: `usage.input` already includes the
+ * system prompt, so a system-subtracted budget fires ~2× early. */
 export function usageSignalsCompact(usage: UsageInfo, window: number): boolean {
   const input = usage.input ?? 0;
   if (input <= 0 || window <= 0) return false;
   return input >= Math.floor(window * PROVIDER_INPUT_COMPACTION_RATIO);
+}
+
+/** Mid-run auto-compact pressure, aligned with session `maybeCompact`:
+ * transcript estimate vs `hardTrigger`, provider input vs `window × 0.9`.
+ * Never add system-prompt tokens to the transcript side or compare provider
+ * input against `hardBudget` — that double-counts the system prompt. */
+export function midRunCompactPressure(input: {
+  transcriptTokens: number;
+  lastInputTokens: number;
+  hardTrigger: number;
+  contextWindow: number;
+}): boolean {
+  if (input.transcriptTokens >= input.hardTrigger) return true;
+  if (input.lastInputTokens <= 0) return false;
+  return usageSignalsCompact(
+    { input: input.lastInputTokens, output: 0 },
+    input.contextWindow,
+  );
 }
 

@@ -1,0 +1,8 @@
+<!-- Dark-theme variant of icons/codepilot.svg. The platform picks this
+     automatically for Darcula (name suffix _dark). -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" fill="#CED0D6">
+    <path d="M4 6 L16 6 L13.5 9 L4 9 Z" />
+    <path d="M6.5 18.5 L13.5 8 L16.2 9.8 L9.2 20.3 Z" />
+    <path d="M15.5 9.5 L18.5 9.5 L18 20 L15 20 Z" />
+    <circle cx="18.5" cy="5.5" r="1.6" />
+</svg>

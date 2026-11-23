@@ -106,11 +106,11 @@ describe("compaction keeps the dropped turns reachable", () => {
     expect(compactEv?.type).toBe("compaction");
     const archive = historyArchivePath(id);
     expect(compactEv && compactEv.type === "compaction" && compactEv.summary).toContain(archive);
-    // The dropped read of retry.ts comes back with the file's CURRENT content.
+    // Hot paths are listed only — bodies are not re-embedded (industry practice).
     const summary = compactEv && compactEv.type === "compaction" ? compactEv.summary : "";
     expect(summary).toContain("<restored_files>");
-    expect(summary).toContain(`## ${join(workDir, "retry.ts")} (1 lines)`);
-    expect(summary).toContain("export const RETRIES = 5;");
+    expect(summary).toContain(`- \`${join(workDir, "retry.ts")}\``);
+    expect(summary).not.toContain("export const RETRIES = 5;");
     const live = session.getEvents();
     expect(live[0]?.type).toBe("compaction");
     expect(live.some((e) => e.type === "message" && e.id === "a0")).toBe(false);
@@ -136,8 +136,9 @@ describe("compaction keeps the dropped turns reachable", () => {
     expect(text).toContain("### USER");
     expect(text).toContain("设计一个消息重试方案");
 
-    const summariserCall = requests.find((r) => r.system?.includes("context compactor"));
-    expect(summariserCall?.system).toContain("1. USER REQUESTS");
+    const summariserCall = requests.find((r) => r.system?.includes("handoff checkpoint"));
+    expect(summariserCall?.system).toBeDefined();
+    expect(summariserCall!.system).toContain("## Goals");
 
     // The retained tail must be written to the log exactly ONCE. compaction's
     // only new durable fact is the summary boundary (+ a rescued plan); it must

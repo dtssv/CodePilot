@@ -39,25 +39,52 @@ export function isVisibleRow(row: Row): boolean {
   }
 }
 
+export interface RowView {
+  /** Expanded state; `undefined` keeps the row's own default. */
+  open?: boolean;
+  focused?: boolean;
+  /** The window renders each sub-agent run as its own row, so the parent card
+   * must not print them again. */
+  runsNested?: boolean;
+}
+
 export function TranscriptItem({
   row,
   live = false,
   maxLines,
+  view,
 }: {
   row: Row;
   live?: boolean;
   /** Live only: cap for streaming text so the redrawn region stays short. */
   maxLines?: number;
+  /** Window state: expanded/focused. Omitted for one-shot renders. */
+  view?: RowView;
 }): React.ReactElement | null {
   switch (row.kind) {
     case "user":
-      return <UserItem text={row.text} />;
+      return <UserItem text={row.text} steer={row.steer} />;
     case "assistant":
-      return <AssistantItem msg={row.msg} maxLines={live ? maxLines : undefined} />;
+      return (
+        <AssistantItem
+          msg={row.msg}
+          maxLines={live ? maxLines : undefined}
+          open={view?.open}
+          focused={view?.focused}
+        />
+      );
     case "tool":
-      return row.tool.category === "plan" ? null : <ToolItem tool={row.tool} live={live} />;
+      return row.tool.category === "plan" ? null : (
+        <ToolItem
+          tool={row.tool}
+          live={live}
+          open={view?.open}
+          focused={view?.focused}
+          runsNested={view?.runsNested}
+        />
+      );
     case "plan":
-      return <PlanItem steps={row.plan} />;
+      return <PlanItem steps={row.plan} open={view?.open} focused={view?.focused} />;
     case "usage":
       return null;
     default:
@@ -87,17 +114,13 @@ export function WelcomeBanner({
   width: number;
 }): React.ReactElement {
   const mode = agentMode === "plan" ? "Plan" : agentMode === "chat" ? "Ask" : "Agent";
-  const label = (s: string): React.ReactElement => <Text color={color.faint}>{s.padEnd(8)}</Text>;
+  // No surrounding box: a bordered card competes with the prompt below it for
+  // the eye and costs four lines of chrome. A logo line plus a hairline rule
+  // separates the header from the conversation just as clearly.
+  const inner = Math.max(32, Math.min(width - 2, 78));
+  const label = (s: string): React.ReactElement => <Text color={color.faint}>{s.padEnd(7)}</Text>;
   return (
-    <Box
-      flexDirection="column"
-      borderStyle="round"
-      borderColor={color.edge}
-      paddingX={2}
-      paddingY={0}
-      width={Math.max(40, Math.min(width - 2, 76))}
-      marginBottom={1}
-    >
+    <Box flexDirection="column" paddingX={1} marginTop={1} marginBottom={1} width={inner}>
       <Box marginBottom={1}>
         <Text bold>
           <Text color={brand[0]}>{glyph.logo} </Text>
@@ -105,25 +128,26 @@ export function WelcomeBanner({
           <Text color={brand[2]}>Pilot</Text>
         </Text>
         <Text color={color.faint}>  v{version}</Text>
+        <Box flexGrow={1} />
+        <Text color={color.accent}>{mode}</Text>
+        <Text color={color.faint}> {glyph.dot} {permissionMode}</Text>
+        {connection ? <Text color={color.faint}> {glyph.dot} {connection}</Text> : null}
       </Box>
       <Text>
         {label("model")}
-        {providerId ? <Text color={color.faint}>{providerId} · </Text> : null}
+        {providerId ? <Text color={color.faint}>{providerId} {glyph.dot} </Text> : null}
         <Text>{model ?? "not configured — run /connect"}</Text>
       </Text>
       <Text>
         {label("folder")}
         <Text>{shortPath(cwd)}</Text>
       </Text>
-      <Text>
-        {label("mode")}
-        <Text color={color.accent}>{mode}</Text>
-        <Text color={color.faint}> · {permissionMode}</Text>
-        {connection ? <Text color={color.faint}> · {connection}</Text> : null}
-      </Text>
+      {/* A drawn box border, not a repeated string: the rule then follows the
+          box's real content width instead of overflowing it and wrapping. */}
+      <Box marginTop={1} borderStyle="single" borderTop={false} borderLeft={false} borderRight={false} borderColor={color.edge} width="100%" />
       <Box marginTop={1}>
         <Text color={color.faint}>
-          / commands {glyph.dot} @ files {glyph.dot} ⇧⇥ mode {glyph.dot} ^O tool details {glyph.dot} ^C stop
+          / commands {glyph.dot} @ files {glyph.dot} ⇧⇥ mode {glyph.dot} ^O details {glyph.dot} ^C stop
         </Text>
       </Box>
     </Box>
@@ -132,7 +156,22 @@ export function WelcomeBanner({
 
 /* ---------------- user / assistant ---------------- */
 
-function UserItem({ text }: { text: string }): React.ReactElement {
+function UserItem({ text, steer }: { text: string; steer?: boolean }): React.ReactElement {
+  if (steer) {
+    return (
+      <Box marginTop={1} flexDirection="row">
+        <Text color={color.accent} dimColor>
+          ✶{" "}
+        </Text>
+        <Box flexGrow={1} flexShrink={1}>
+          <Text color={color.accent} dimColor>
+            inject ·{" "}
+          </Text>
+          <Text dimColor>{text.trim() || " "}</Text>
+        </Box>
+      </Box>
+    );
+  }
   return (
     <Box marginTop={1} flexDirection="row">
       <Text color={color.accent} bold>
@@ -156,17 +195,27 @@ export function tailMarkdown(text: string, n: number): { text: string; hidden: n
   return { text: (fences % 2 === 1 ? "```\n" : "") + tail.join("\n"), hidden: cut };
 }
 
-function AssistantItem({ msg, maxLines }: { msg: MessageRow; maxLines?: number }): React.ReactElement {
+function AssistantItem({
+  msg,
+  maxLines,
+  open,
+  focused,
+}: {
+  msg: MessageRow;
+  maxLines?: number;
+  open?: boolean;
+  focused?: boolean;
+}): React.ReactElement {
   const streaming = msg.streaming;
   const body = maxLines !== undefined ? tailMarkdown(msg.text, Math.max(3, maxLines)) : { text: msg.text, hidden: 0 };
   const reasoning = msg.reasoning?.trim() ?? "";
   const showText = hasVisibleAssistantContent(msg.text);
   return (
     <Box marginTop={1} flexDirection="column">
-      {reasoning ? <ThinkingItem text={reasoning} live={streaming && !showText} /> : null}
+      {reasoning ? <ThinkingItem text={reasoning} live={streaming && !showText} open={open} focused={focused} /> : null}
       {showText ? (
         <Box flexDirection="row">
-          <Text color={color.accent}>{glyph.assistant} </Text>
+          <Text color={focused ? color.accent : color.accent}>{focused ? "▸" : glyph.assistant} </Text>
           <Box flexDirection="column" flexGrow={1} flexShrink={1} width="100%">
             {body.hidden > 0 ? <Text color={color.faint}>… {body.hidden} lines above</Text> : null}
             {streaming && maxLines !== undefined ? (
@@ -200,22 +249,42 @@ function LivePlain({ text }: { text: string }): React.ReactElement {
   );
 }
 
-function ThinkingItem({ text, live }: { text: string; live: boolean }): React.ReactElement {
+function ThinkingItem({
+  text,
+  live,
+  open = false,
+  focused = false,
+}: {
+  text: string;
+  live: boolean;
+  open?: boolean;
+  focused?: boolean;
+}): React.ReactElement {
   const lines = text.split("\n").filter((l) => l.trim() !== "");
-  const shown = live ? lines.slice(-3) : lines.slice(0, 3);
+  // Open rows show the reasoning in full; collapsed rows keep the tail while
+  // streaming (progress is the point) and the head once it has settled.
+  const shown = open ? lines : live ? lines.slice(-2) : lines.slice(0, 1);
   const more = lines.length - shown.length;
   return (
     <Box flexDirection="column" marginBottom={0}>
-      <Text color={color.faint} italic>
-        ✻ Thinking{more > 0 ? ` · ${more} more lines` : ""}
+      <Text color={focused ? color.accent : color.faint} italic>
+        {open ? "▾" : "▸"} ✻ Thinking{focused ? " · ↵ open" : ""}
+        {more > 0 && !open ? ` · ${more} more lines` : ""}
       </Text>
-      <Box paddingLeft={2} flexDirection="column">
-        {shown.map((l, i) => (
-          <Text key={i} color={color.faint} italic wrap="truncate-end">
-            {l}
-          </Text>
-        ))}
-      </Box>
+      {shown.length > 0 ? (
+        <Box paddingLeft={2} flexDirection="column">
+          {shown.map((l, i) => (
+            <Text key={i} color={color.faint} italic wrap="truncate-end">
+              {l}
+            </Text>
+          ))}
+        </Box>
+      ) : null}
+      {open && more > 0 ? (
+        <Box paddingLeft={2}>
+          <Text color={color.faint}>… {more} more lines</Text>
+        </Box>
+      ) : null}
     </Box>
   );
 }
@@ -281,57 +350,159 @@ function Result({ children }: { children: React.ReactNode }): React.ReactElement
   );
 }
 
-export function ToolItem({ tool, live = false }: { tool: ToolRow; live?: boolean }): React.ReactElement {
+export function ToolHeader({
+  tool,
+  live = false,
+  open = false,
+  focused = false,
+}: {
+  tool: ToolRow;
+  live?: boolean;
+  /** Open state, only used for the fold marker. */
+  open?: boolean;
+  /** Keyboard focus, drawn as a caret so the row is discoverable. */
+  focused?: boolean;
+}): React.ReactElement {
   useTick(live && tool.status === "running", 1000);
   const label = toolLabel(tool);
   const took = elapsed(tool, Date.now());
   const command = tool.category === "bash" ? bashCommand(tool) : undefined;
   const subject = command === undefined ? toolSubject(tool) : "";
   const kind = tool.category === "task" ? agentType(tool) : undefined;
-  const multiLineCommand = command !== undefined && (command.includes("\n") || command.length > 70);
+  const multiLine = command !== undefined && (command.includes("\n") || command.length > 70);
+  const collapsible = isCollapsible(tool);
 
   return (
-    <Box marginTop={1} flexDirection="column">
-      <Box flexDirection="row">
-        <StatusDot status={tool.status} live={live} />
-        <Text> </Text>
-        <Box flexDirection="row" flexShrink={1}>
-          <Text bold>{label}</Text>
-          {kind ? <Text color={color.info}> {kind}</Text> : null}
-          {command !== undefined && !multiLineCommand ? (
-            <Text>
-              {"  "}
-              {tokenizeLine(command, "bash").map((tok, j) => (
-                <Text key={j} color={SYNTAX_COLOR[tok.kind]}>
-                  {tok.text}
-                </Text>
-              ))}
-            </Text>
-          ) : subject ? (
-            <Box flexShrink={1}>
-              <Text color={tool.category === "task" ? undefined : color.faint}>  {subject}</Text>
-            </Box>
-          ) : null}
-          {tool.added ? <Text color={color.add}>  +{tool.added}</Text> : null}
-          {tool.removed ? <Text color={color.remove}> −{tool.removed}</Text> : null}
-        </Box>
-        {took ? <Text color={color.faint}> {glyph.dot} {took}</Text> : null}
-      </Box>
-      {multiLineCommand ? (
-        <Box paddingLeft={2} marginTop={0}>
-          <Box borderStyle="single" borderLeft borderRight={false} borderTop={false} borderBottom={false} borderColor={color.edge} paddingLeft={1}>
-            <ShellCommand command={command!} maxLines={live ? 4 : 8} />
+    <Box flexDirection="row">
+      <Text color={focused ? color.accent : color.faint}>{focused ? "▸ " : "  "}</Text>
+      <StatusDot status={tool.status} live={live} />
+      <Text> </Text>
+      <Box flexDirection="row" flexShrink={1}>
+        <Text bold>{label}</Text>
+        {kind ? <Text color={color.info}> {kind}</Text> : null}
+        {command !== undefined && !multiLine ? (
+          <Text>
+            {"  "}
+            {tokenizeLine(command, "bash").map((tok, j) => (
+              <Text key={j} color={SYNTAX_COLOR[tok.kind]}>
+                {tok.text}
+              </Text>
+            ))}
+          </Text>
+        ) : subject ? (
+          <Box flexShrink={1}>
+            <Text color={tool.category === "task" ? undefined : color.faint}>  {subject}</Text>
           </Box>
-        </Box>
+        ) : null}
+        {tool.added ? <Text color={color.add}>  +{tool.added}</Text> : null}
+        {tool.removed ? <Text color={color.remove}> −{tool.removed}</Text> : null}
+      </Box>
+      {took ? <Text color={color.faint}> {glyph.dot} {took}</Text> : null}
+      {collapsible ? (
+        <Text color={color.faint}>
+          {"  "}
+          {open ? "▾" : "▸"}
+          {focused && !open ? " ↵" : ""}
+        </Text>
       ) : null}
-      <ToolBody tool={tool} live={live} />
     </Box>
   );
 }
 
-function ToolBody({ tool, live }: { tool: ToolRow; live: boolean }): React.ReactElement | null {
+/** A tool card: header line plus the body the viewport decided to show. */
+export function ToolItem({
+  tool,
+  live = false,
+  open = false,
+  focused = false,
+  runsNested = false,
+}: {
+  tool: ToolRow;
+  live?: boolean;
+  open?: boolean;
+  focused?: boolean;
+  runsNested?: boolean;
+}): React.ReactElement {
+  const command = tool.category === "bash" ? bashCommand(tool) : undefined;
+  const multiLine = command !== undefined && (command.includes("\n") || command.length > 70);
+  return (
+    <Box flexDirection="column">
+      <ToolHeader tool={tool} live={live} open={open} focused={focused} />
+      {multiLine && (open || live) ? (
+        <Box paddingLeft={2} marginTop={0}>
+          <Box
+            borderStyle="single"
+            borderLeft
+            borderRight={false}
+            borderTop={false}
+            borderBottom={false}
+            borderColor={color.edge}
+            paddingLeft={1}
+          >
+            <ShellCommand command={command!} maxLines={open ? 24 : live ? 4 : 8} />
+          </Box>
+        </Box>
+      ) : null}
+      <ToolBody tool={tool} live={live} open={open} runsNested={runsNested} />
+    </Box>
+  );
+}
+
+/** Whether a row has anything to fold away. */
+export function isCollapsibleRow(row: Row): boolean {
+  switch (row.kind) {
+    case "tool":
+      return isCollapsible(row.tool);
+    case "assistant":
+      return !!row.msg.reasoning?.trim();
+    case "plan":
+      return row.plan.length > 2;
+    default:
+      return false;
+  }
+}
+
+/** Rows that show their body without the user asking. */
+export function defaultOpen(row: Row): boolean {
+  switch (row.kind) {
+    case "plan":
+      return true;
+    case "tool":
+      return row.tool.status === "running";
+    default:
+      return false;
+  }
+}
+
+/** Sub-agent runs nested in a tool row, for the drill-down view. */
+export function subagentRuns(row: Row): readonly SubagentRun[] {
+  return row.kind === "tool" ? (row.tool.subagents ?? []) : [];
+}
+
+/** Tools whose body is worth folding: anything with output, a diff, or children. */
+function isCollapsible(tool: ToolRow): boolean {
+  if ((tool.subagents?.length ?? 0) > 0) return true;
+  if (tool.status === "running") return false;
+  if (tool.category === "edit" || tool.category === "write") return true;
+  const lines = (tool.resultText ?? "").split("\n").length;
+  return lines > 4;
+}
+
+function ToolBody({
+  tool,
+  live,
+  open,
+  runsNested = false,
+}: {
+  tool: ToolRow;
+  live: boolean;
+  open: boolean;
+  runsNested?: boolean;
+}): React.ReactElement | null {
   if (tool.category === "task" || (tool.subagents?.length ?? 0) > 0) {
-    return <SubagentBody tool={tool} live={live} />;
+    // Nested rows already print every run below this header; repeating them here
+    // is what made one delegation read as three identical objectives.
+    return runsNested ? null : <SubagentBody tool={tool} live={live} open={open} />;
   }
   if (tool.status === "running") {
     return live ? (
@@ -341,7 +512,7 @@ function ToolBody({ tool, live }: { tool: ToolRow; live: boolean }): React.React
     ) : null;
   }
   if ((tool.category === "edit" || tool.category === "write") && tool.status === "ok") {
-    const diff = editDiff(tool, 10);
+    const diff = editDiff(tool, open ? 200 : 10);
     if (diff.lines.length === 0) return null;
     return (
       <Result>
@@ -350,11 +521,11 @@ function ToolBody({ tool, live }: { tool: ToolRow; live: boolean }): React.React
             {l.sign} {l.text}
           </Text>
         ))}
-        {diff.hidden > 0 ? <Text color={color.faint}>… {diff.hidden} more lines · ^O to view</Text> : null}
+        {diff.hidden > 0 ? <Text color={color.faint}>… {diff.hidden} more lines · ↵ to open</Text> : null}
       </Result>
     );
   }
-  const preview = resultPreview(tool, 4);
+  const preview = resultPreview(tool, open ? 200 : 4);
   if (preview.lines.length === 0) return null;
   const tone = preview.tone === "error" ? color.remove : preview.tone === "faint" ? color.faint : undefined;
   return (
@@ -364,7 +535,7 @@ function ToolBody({ tool, live }: { tool: ToolRow; live: boolean }): React.React
           {l || " "}
         </Text>
       ))}
-      {preview.hidden > 0 ? <Text color={color.faint}>… {preview.hidden} more lines · ^O to view</Text> : null}
+      {preview.hidden > 0 ? <Text color={color.faint}>… {preview.hidden} more lines · ↵ to open</Text> : null}
     </Result>
   );
 }
@@ -374,7 +545,15 @@ function stepLine(step: ToolRow): string {
   return `${toolLabel(step)}${subject ? `  ${oneLine(subject, 90)}` : ""}`;
 }
 
-function SubagentBody({ tool, live }: { tool: ToolRow; live: boolean }): React.ReactElement | null {
+function SubagentBody({
+  tool,
+  live,
+  open,
+}: {
+  tool: ToolRow;
+  live: boolean;
+  open: boolean;
+}): React.ReactElement | null {
   const runs = tool.subagents ?? [];
   if (runs.length === 0) {
     if (tool.status === "running") {
@@ -398,14 +577,31 @@ function SubagentBody({ tool, live }: { tool: ToolRow; live: boolean }): React.R
   return (
     <Result>
       {runs.map((run) => (
-        <SubagentRunView key={run.index} run={run} multi={runs.length > 1} live={live} />
+        <SubagentRunView key={run.index} run={run} multi={runs.length > 1} live={live} open={open} />
       ))}
     </Result>
   );
 }
 
-function SubagentRunView({ run, multi, live }: { run: SubagentRun; multi: boolean; live: boolean }): React.ReactElement {
-  const keep = live ? 4 : 3;
+export function SubagentRunView({
+  run,
+  multi,
+  live,
+  open,
+  focused = false,
+  drillable = false,
+}: {
+  run: SubagentRun;
+  multi: boolean;
+  live: boolean;
+  open: boolean;
+  focused?: boolean;
+  /** Adds the ↵ affordance; the parent owns what ↵ does. */
+  drillable?: boolean;
+}): React.ReactElement {
+  // Open cards keep the whole step list; collapsed ones stay a glance (progress
+  // plus the tail) so a long sub-agent run cannot swallow the viewport.
+  const keep = open ? run.steps.length : live ? 4 : 3;
   const hidden = Math.max(0, run.steps.length - keep);
   const shown = run.steps.slice(hidden);
   const ms = run.startedAt ? (run.finishedAt ?? Date.now()) - run.startedAt : 0;
@@ -420,11 +616,27 @@ function SubagentRunView({ run, multi, live }: { run: SubagentRun; multi: boolea
     : [];
   return (
     <Box flexDirection="column">
-      <Text>
-        <Text color={stateColor}>◇ </Text>
-        {multi ? <Text bold>#{(run.runSeq ?? run.index + 1)} </Text> : null}
-        <Text color={color.faint}>{oneLine(run.objective, 80)}</Text>
-      </Text>
+      {/* Header: the objective is the content, so it gets the normal foreground
+          and the whole width; state and cost move to a right-aligned tail. */}
+      <Box flexDirection="row">
+        <Text color={focused ? color.accent : stateColor}>{focused ? "▸ " : "◇ "}</Text>
+        {multi ? <Text bold color={color.info}>#{(run.runSeq ?? run.index + 1)} </Text> : null}
+        <Box flexGrow={1} flexShrink={1} marginRight={1}>
+          <Text bold={focused} wrap="truncate-end">
+            {run.objective.replace(/\s+/g, " ").trim()}
+          </Text>
+        </Box>
+        <Text color={color.faint}>
+          <Text color={stateColor}>{stateWord}</Text>
+          {" "}
+          {run.steps.length} {run.steps.length === 1 ? "step" : "steps"}
+          {ms >= 100 ? ` ${glyph.dot} ${formatDuration(ms)}` : ""}
+          {run.background ? ` ${glyph.dot} bg` : ""}
+          {drillable ? (focused ? ` ${glyph.dot} ↵ open` : ` ${glyph.dot} ↵`) : ""}
+        </Text>
+      </Box>
+      {/* A hairline gutter ties the steps to the run without another indent
+          level, and keeps sibling runs visibly separate. */}
       <Box flexDirection="column" paddingLeft={2}>
         {hidden > 0 ? <Text color={color.faint}>… {hidden} earlier steps</Text> : null}
         {shown.map((s) => {
@@ -438,14 +650,6 @@ function SubagentRunView({ run, multi, live }: { run: SubagentRun; multi: boolea
             </Text>
           );
         })}
-        <Text color={color.faint}>
-          <Text color={stateColor}>{stateWord}</Text>
-          {" "}
-          {glyph.dot} {run.steps.length} tool {run.steps.length === 1 ? "use" : "uses"}
-          {ms >= 100 ? ` ${glyph.dot} ${formatDuration(ms)}` : ""}
-          {run.background ? ` ${glyph.dot} background` : ""}
-          {` ${glyph.dot} ^O to view`}
-        </Text>
         {previewLines.map((l, i) => (
           <Text key={i} wrap="truncate-end" color={run.state === "running" ? color.faint : undefined}>
             {l}
@@ -458,17 +662,32 @@ function SubagentRunView({ run, multi, live }: { run: SubagentRun; multi: boolea
 
 /* ---------------- plan & notices ---------------- */
 
-function PlanItem({ steps }: { steps: PlanStep[] }): React.ReactElement {
+function PlanItem({
+  steps,
+  open = true,
+  focused = false,
+}: {
+  steps: PlanStep[];
+  open?: boolean;
+  focused?: boolean;
+}): React.ReactElement {
   const { done, total } = planProgress(steps);
+  const shown = open ? steps : steps.filter((s) => s.status !== "completed");
+  const folded = steps.length - shown.length;
   return (
     <Box marginTop={1} flexDirection="column">
       <Text>
-        <Text color={color.info}>▤ </Text>
+        <Text color={focused ? color.accent : color.info}>{focused ? "▸ " : "▤ "}</Text>
         <Text bold>Plan</Text>
         <Text color={color.faint}>  {done}/{total} done</Text>
+        <Text color={color.faint}>
+          {"  "}
+          {open ? "▾" : "▸"}
+          {folded > 0 ? ` ${folded} hidden` : ""}
+        </Text>
       </Text>
       <Box flexDirection="column" paddingLeft={2}>
-        {steps.map((s) => (
+        {shown.map((s) => (
           <Text key={s.id}>
             {s.status === "completed" ? (
               <Text color={color.add}>{glyph.ok} </Text>

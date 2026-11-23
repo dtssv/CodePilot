@@ -13,6 +13,10 @@
 
 import type { AgentMode } from "../types.js";
 import type { ToolDef, ToolRegistry } from "./types.js";
+import { modelGlobMatch } from "../config/modelGlob.js";
+
+/** Re-export — implementation lives in browser-safe `config/modelGlob`. */
+export { modelGlobMatch };
 
 /**
  * Tool names that are always safe (no side effects on user files). Used as
@@ -36,11 +40,8 @@ const READ_TOOLS: ReadonlySet<string> = new Set([
 
 /** Tool names allowed in `plan` mode but NOT in `chat` mode. */
 const PLAN_ONLY_TOOLS: ReadonlySet<string> = new Set([
-  "plan_update",
- // plan_done is the plan-mode exit ramp.
-  "plan_done",
- // memory_write is `write`-tier but harmless; allowed in plan to capture
- // findings while exploring. Excluded from chat on purpose.
+  "plan",
+  // memory_write is write-tier but harmless in plan; excluded from chat.
   "memory_write",
 ]);
 
@@ -51,26 +52,15 @@ const ALWAYS_DENIED: ReadonlySet<string> = new Set([
   "write_file",
   "edit_file",
   "task",
-  // Control tools for background sub-agents: dispatching needs `task` (denied
-  // here), so their companions are denied in restricted modes too.
-  "subagent_list",
-  "subagent_wait",
-  "subagent_interrupt",
-  // Executes arbitrary model-written JS that can write files / run bash — same
-  // (actually broader) risk profile as bash, so blocked in chat/plan.
   "code_mode",
-  // Spawns an external agent subprocess — same risk profile as `task`.
   "harness_bridge",
-  // Goal-loop tools: agent-only so chat/plan tool tables stay lean.
-  "start_goal",
-  "goal_status",
+  // Goal loop: agent-only.
+  "goal",
 ]);
 
 /** Tools that are blocked specifically in `chat` mode (state-modifying read-tier tools). */
 const CHAT_DENIED: ReadonlySet<string> = new Set([
- // Records a plan event — chat mode wants the model to answer, not plan.
-  "plan_update",
- // Side effect on memory files.
+  "plan",
   "memory_write",
 ]);
 
@@ -81,10 +71,10 @@ const CHAT_DENIED: ReadonlySet<string> = new Set([
  * For `agent` mode, returns the input list unchanged.
  *
  * For `chat` mode, only the read-only baseline is kept. Write/execute/network
- * tools are dropped, along with `plan_update` and `memory_write` (which are
- * state-modifying even though `plan_update` is `read`-tier).
+ * tools are dropped, along with `plan` and `memory_write` (which are
+ * state-modifying even though `plan` is `read`-tier).
  *
- * For `plan` mode, the read-only set plus `plan_update` (and `memory_write`)
+ * For `plan` mode, the read-only set plus `plan` (and `memory_write`)
  * are kept. `bash`, `write_file`, `edit_file`, `task` remain forbidden.
  *
  * Tools not in any of the curated lists — for instance MCP tools — fall
@@ -123,32 +113,6 @@ export function filterToolsByModeFromRegistry(
 export interface ToolExposureRule {
   models: string[];
   drop: string[];
-}
-
-/** Anchored glob: `*` → any run, `?` → one char; everything else literal and
- * case-insensitive (model ids vary in case across gateways). The pattern is
- * tested against both the full id and the bare name after the last `/`, so a
- * rule written as `glm*` matches `jdcloud/glm-5.2` without the user having to
- * know the provider prefix. */
-export function modelGlobMatch(pattern: string, modelId: string): boolean {
-  const re =
-    "^" +
-    pattern
-      .split(/(\*|\?)/)
-      .map((part) =>
-        part === "*" ? ".*" : part === "?" ? "." : part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
-      )
-      .join("") +
-    "$";
-  let rx: RegExp;
-  try {
-    rx = new RegExp(re, "i");
-  } catch {
-    return false;
-  }
-  if (rx.test(modelId)) return true;
-  const slash = modelId.lastIndexOf("/");
-  return slash >= 0 && rx.test(modelId.slice(slash + 1));
 }
 
 /**

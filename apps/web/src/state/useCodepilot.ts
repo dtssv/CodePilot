@@ -36,8 +36,9 @@ import {
   savePrefs,
   saveReasoningEffort,
 } from "../prefs.js";
+import { t } from "../i18n.js";
 import { initialState, reducer, type AppState } from "./reducer.js";
-import { lastUserPrompt } from "./selectors.js";
+import { endsInError, lastUserPrompt } from "./selectors.js";
 
 export interface WsTarget {
   url: string;
@@ -58,6 +59,8 @@ export interface Codepilot {
   changeCwd(cwd: string): Promise<void>;
  /** Add/focus a workspace folder and bind subsequent sessions to it. */
   openWorkspace(cwd: string): Promise<void>;
+  /** Restore last-used model into the picker (no session create). */
+  applyPreferredModel(cwd: string): Promise<void>;
  /** Seed the local workspace list without switching the active one. By default
   * merges; pass `replace: true` to make the list EXACTLY `cwds` (used by a
   * remote phone so only the grant-authorized workspaces show, never the
@@ -304,6 +307,10 @@ export function useCodepilot(): Codepilot {
         });
         cursor = nextBefore;
       } catch {
+        dispatch({
+          type: "notice",
+          text: "Failed to load older history. Scroll up to retry.",
+        });
         return;
       } finally {
         historyInflight.current = false;
@@ -331,7 +338,10 @@ export function useCodepilot(): Codepilot {
         historyBefore: chunk.historyBefore,
       });
     } catch {
-      /* fail-soft: layout near-top retry / scroll will try again */
+      dispatch({
+        type: "notice",
+        text: "Failed to load older history. Scroll up to retry.",
+      });
     } finally {
       historyInflight.current = false;
     }
@@ -368,32 +378,21 @@ export function useCodepilot(): Codepilot {
     async (cwd: string) => {
       try {
         const snap = await client.getConfig(cwd);
- // Match prefs against every selectable row (chat + small); fall back
- // to the first chat model so we don't land on a tiny-only id.
+        // Match prefs against every selectable row (chat + small). Do NOT fall
+        // back to the first chat model — inventing a pick would paint a model
+        // the user never chose. newSession pins whatever we show here.
         const all = snap.selectableModels.map((m) => ({
           providerId: m.providerId,
           model: m.model,
         }));
-        const chat = snap.selectableModels
-          .filter((m) => m.kind === "chat")
-          .map((m) => ({ providerId: m.providerId, model: m.model }));
         const matched = matchPreferredEndpoint(cwd, all);
-        const pref =
-          matched ??
-          (chat[0]
-            ? { providerId: chat[0].providerId, model: chat[0].model }
-            : all[0]
-              ? { providerId: all[0].providerId, model: all[0].model }
-              : undefined);
-        if (!pref) return;
- // Only rewrite storage when we restored a remembered pick — never
- // overwrite a saved model with the "first in list" fallback.
-        if (matched) saveEndpointPref(cwd, matched);
-        dispatch({ type: "endpoint", model: pref.model, providerId: pref.providerId });
+        if (!matched) return;
+        saveEndpointPref(cwd, matched);
+        dispatch({ type: "endpoint", model: matched.model, providerId: matched.providerId });
         live.current = {
           ...live.current,
-          model: pref.model,
-          providerId: pref.providerId,
+          model: matched.model,
+          providerId: matched.providerId,
         };
       } catch {
  /* optional */
@@ -560,8 +559,9 @@ export function useCodepilot(): Codepilot {
       }
       const agentMode = mode ?? live.current.agentMode;
       try {
- // Keep the model already shown in the picker; only fill from prefs
- // when nothing is selected yet (do not clobber a manual pick).
+        // What the picker shows is what new chat must use. Workspace select
+        // restores prefs into live.current.model; omitting model here used to
+        // let server session-history sticky diverge from that display.
         let model = live.current.model;
         let providerId = live.current.providerId;
         if (!model) {
@@ -569,14 +569,15 @@ export function useCodepilot(): Codepilot {
           model = live.current.model;
           providerId = live.current.providerId;
         }
+        const pin = !!model;
         const sessionId = await client.newSession({
           cwd,
           agentMode,
-          model: model || undefined,
+          ...(pin ? { model } : {}),
         });
         live.current = { ...live.current, sessionId, agentMode };
         dispatch({ type: "session-opened", sessionId, agentMode });
-        if (model && providerId) {
+        if (pin && model && providerId) {
           try {
             const effort = loadReasoningEffort(model, providerId);
             const result = await client.setModel(
@@ -648,7 +649,8 @@ export function useCodepilot(): Codepilot {
       try {
         const res = await client.send(sessionId, text, images, files, delivery);
         if (res?.delivery === "steered") {
-          dispatch({ type: "notice", text: "Injected into the current run" });
+          dispatch({ type: "pending-steer", text });
+          dispatch({ type: "notice", text: t("Will apply after the current step") });
         }
       } catch (err) {
         dispatch({ type: "notice", text: describeError(err) });
@@ -701,7 +703,7 @@ export function useCodepilot(): Codepilot {
       try {
         const res = await client.sendFollowUpNow(id, followUpId);
         if (res?.delivery === "steered" || res?.delivery === "started") {
-          dispatch({ type: "notice", text: "Injected into the current run" });
+          dispatch({ type: "notice", text: t("Will apply after the current step") });
         } else {
           dispatch({ type: "notice", text: "Could not send queued message (already gone?)" });
         }
@@ -726,15 +728,25 @@ export function useCodepilot(): Codepilot {
   const retryLast = useCallback(async () => {
     const id = live.current.sessionId;
     if (!id) return;
-    // Prefer resuming the last turn from the breakpoint (no new user bubble):
-    // the agent re-engages exactly where it stopped. Only when there is
-    // nothing to resume (the server reports `noop`) do we fall back to
-    // re-sending the last prompt as a fresh message.
+    // Prefer resuming the last turn from the breakpoint (no new user bubble).
+    // If the server says noop but the UI still ends in an error, do NOT
+    // fall back to prompt/send — that duplicates the user message.
     try {
       const res = await client.resumeTurn(id);
       if (res.delivery !== "noop") return;
     } catch {
-      /* fall through to resend */
+      dispatch({
+        type: "notice",
+        text: "Could not resume the last turn. Try again or send a new message.",
+      });
+      return;
+    }
+    if (endsInError(live.current.rows)) {
+      dispatch({
+        type: "notice",
+        text: "Resume was unavailable for this error. Send a new message if you want to continue.",
+      });
+      return;
     }
     const text = lastUserPrompt(live.current.rows);
     if (!text) return;
@@ -773,8 +785,8 @@ export function useCodepilot(): Codepilot {
         reasoningEffort !== undefined
           ? reasoningEffort
           : loadReasoningEffort(model, pref.providerId);
- // Always remember for this cwd (and as last-used) so the next visit
- // restores: cwd → previous workspace → first model.
+      // Remember for this cwd (and as last-used). newSession pins whatever is
+      // in live.current.model so the picker display and the new chat match.
       saveEndpointPref(live.current.cwd || undefined, pref);
       if (reasoningEffort !== undefined) {
         saveReasoningEffort(model, pref.providerId, effort ?? undefined);
@@ -853,9 +865,17 @@ export function useCodepilot(): Codepilot {
   const notify = useCallback((text?: string) => dispatch({ type: "notice", text }), []);
 
   const closeSession = useCallback(() => {
-    live.current = { ...live.current, sessionId: undefined };
+    const cwd = live.current.cwd;
+    live.current = {
+      ...live.current,
+      sessionId: undefined,
+      model: undefined,
+      providerId: undefined,
+    };
     dispatch({ type: "session-closed" });
-  }, []);
+    // Keep the picker on last-used model (host "new" / close must not blank it).
+    if (cwd) void applyPreferredModel(cwd);
+  }, [applyPreferredModel]);
 
   const pinSession = useCallback(
     async (id: string, pinned: boolean) => {
@@ -882,6 +902,7 @@ export function useCodepilot(): Codepilot {
     disconnect,
     changeCwd,
     openWorkspace,
+    applyPreferredModel,
     seedWorkspaces,
     closeWorkspace,
     newSession,

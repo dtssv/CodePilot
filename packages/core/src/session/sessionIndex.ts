@@ -110,6 +110,8 @@ function parseSession(
             if (first && first.type === "text") firstUserText = first.text;
           }
           if (e.role === "assistant" && e.model) model = e.model;
+        } else if (e.type === "model" && e.model) {
+          model = e.model;
         } else if (e.type === "mode") {
           mode = e.mode;
         } else if (e.type === "status") {

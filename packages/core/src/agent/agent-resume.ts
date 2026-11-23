@@ -57,8 +57,8 @@ export const TRUNCATED_CALL =
   "(write_file for the first part, then edit_file / apply_patch to append the rest).";
 
 export const PLAN_ONLY_TURN =
-  "\n\nNote: this response contained only plan_update, which cost a full extra request. Next " +
-  "time, send plan_update in the same response as the tool calls for the step you're starting.";
+  "\n\nNote: this response contained only a plan update, which cost a full extra request. Next " +
+  "time, send `plan` (action=update) in the same response as the tool calls for the step you're starting.";
 
 export const MALFORMED_CALL =
   "This tool call's arguments were not valid JSON, so it was NOT executed. Re-issue it with " +

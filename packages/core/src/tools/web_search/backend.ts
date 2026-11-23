@@ -46,6 +46,46 @@ export function resolveSearchBackend(
   return { provider: "duckduckgo" };
 }
 
+export type ResolvedSearchBackend = ReturnType<typeof resolveSearchBackend>;
+
+/**
+ * Auto-mode fallback chain (explicit `webSearch.provider` skips this).
+ * Order: brave → serper → google → duckduckgo.
+ */
+export function listAutoSearchBackends(
+  cfg: WebSearchConfig | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): ResolvedSearchBackend[] {
+  if (cfg?.provider) return [resolveSearchBackend(cfg, env)];
+  const out: ResolvedSearchBackend[] = [];
+  const seen = new Set<string>();
+  const push = (b: ResolvedSearchBackend): void => {
+    const key = `${b.provider}:${b.apiKey ?? ""}:${b.cx ?? ""}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(b);
+  };
+  if (cfg?.apiKey || env.BRAVE_API_KEY) {
+    push({
+      provider: "brave",
+      apiKey: cfg?.apiKey ?? env.BRAVE_API_KEY,
+      endpoint: cfg?.endpoint,
+    });
+  }
+  if (env.SERPER_API_KEY) push({ provider: "serper", apiKey: env.SERPER_API_KEY });
+  if (env.GOOGLE_API_KEY && env.GOOGLE_CSE_ID) {
+    push({ provider: "google", apiKey: env.GOOGLE_API_KEY, cx: env.GOOGLE_CSE_ID });
+  }
+  push({ provider: "duckduckgo" });
+  return out.length > 0 ? out : [{ provider: "duckduckgo" }];
+}
+
+/** True when an error looks like auth / rate-limit / server fault worth trying next backend. */
+export function isRetriableSearchError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\b(401|403|429|500|502|503|504)\b|rate.?limit|unauthorized|forbidden|quota/i.test(msg);
+}
+
 /**
  * Decide the effective locale for a query, with a three-tier priority:
  *   per-call `overrides` (tool input) > `webSearch` config > script auto-detect.

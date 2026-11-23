@@ -246,20 +246,26 @@ class ChatPanel(private val project: com.intellij.openapi.project.Project) : Cha
         }
     }
 
- /** Drop an editor selection into the composer as a reference, without sending
- * without sending. When [newChat] is true, open a fresh session first. */
-    override fun addEditorContext(filePath: String, language: String?, snippet: String, newChat: Boolean) {
+ /** Drop a file reference into the composer, without sending.
+ * The Swing fallback has no chip UI, so it falls back to `@path:lines` text. */
+    override fun addReference(path: String, startLine: Int?, endLine: Int?, newChat: Boolean) {
         if (newChat) startNewSession()
-        val tagged = buildString {
-            append("```")
-            language?.let { append(it) }
-            append("\n// @").append(filePath).append("\n").append(snippet).append("\n```")
-        }
-        prefillInput(tagged)
+        prefillInput(refText(path, startLine, endLine))
     }
 
-    /** Swing fallback has no Settings sheet — open the IDE CodePilot configurable. */
-    override fun openSettings() {
+    override fun askAboutCode(path: String, startLine: Int?, endLine: Int?, question: String) {
+        prefillInput("${refText(path, startLine, endLine)}\n\n$question")
+    }
+
+    /** `@path` or `@path:12-24` — the composer's plain-text reference syntax. */
+    private fun refText(path: String, startLine: Int?, endLine: Int?): String = when {
+        startLine == null -> "@$path"
+        endLine == null || endLine == startLine -> "@$path:$startLine"
+        else -> "@$path:$startLine-$endLine"
+    }
+
+    /** Swing fallback has no JCEF Settings tab — open the IDE CodePilot configurable. */
+    override fun openSettings(section: String?) {
         SwingUtilities.invokeLater {
             ShowSettingsUtil.getInstance().showSettingsDialog(project, CodepilotSettingsConfigurable::class.java)
         }

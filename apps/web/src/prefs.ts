@@ -116,6 +116,14 @@ export function replaceWorkspaces(cwds: string[]): string[] {
   return next;
 }
 
+/** Optional sink so IDE hosts can mirror endpoint prefs across webviews. */
+type EndpointPrefSink = (cwd: string | undefined, pref: EndpointPref) => void;
+let endpointPrefSink: EndpointPrefSink | undefined;
+
+export function setEndpointPrefSink(sink: EndpointPrefSink | undefined): void {
+  endpointPrefSink = sink;
+}
+
 /** Remember the model chosen for a workspace (and as the global last pick). */
 export function saveEndpointPref(cwd: string | undefined, pref: EndpointPref): void {
   if (!pref.model) return;
@@ -139,6 +147,11 @@ export function saveEndpointPref(cwd: string | undefined, pref: EndpointPref): v
   }
   try {
     localStorage.setItem(LAST_ENDPOINT_KEY, JSON.stringify(normalized));
+  } catch {
+ /* ignore */
+  }
+  try {
+    endpointPrefSink?.(cwd, normalized);
   } catch {
  /* ignore */
   }

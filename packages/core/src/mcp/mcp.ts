@@ -54,11 +54,21 @@ export {
   buildMcpToolNameMap,
   mcpToolName,
   mcpResourceToolName,
+  mcpPromptCommandName,
+  mcpPromptCommandNamePrefixed,
+  parseMcpPromptCommandName,
   parseMcpToolName,
   MCP_REF_REGEX,
   parseMcpReference,
   resolveMcpReferences,
 } from "./mcp-names.js";
+export {
+  listMcpPromptSlashCommands,
+  expandMcpPromptCommand,
+  mcpPromptToSlashCommand,
+  formatPromptResult,
+  formatResourceReadResult,
+} from "./mcpPromptCommands.js";
 // The constant lives in mcp-types (alongside the type surface); re-export
 // from there rather than from mcp-names.
 export { MCP_TOOL_NAME_MAX_LENGTH } from "./mcp-types.js";
@@ -94,6 +104,16 @@ function buildClient(
 // ---------------------------------------------------------------------------
 // Manager
 // ---------------------------------------------------------------------------
+
+/** Optional knobs for {@link McpManager} construction. */
+export interface McpManagerOptions {
+  /** Wall-clock for tools/resources/prompts calls (ms). */
+  requestTimeoutMs?: number;
+  /** Wall-clock for initialize + list discovery (ms). */
+  startupTimeoutMs?: number;
+  /** Advertise sampling/elicitation when the host can handle reverse requests. */
+  clientReverseRequests?: boolean;
+}
 
 /**
  * Manager owning one client per configured MCP server. Fail-soft: a single
@@ -203,6 +223,8 @@ export class McpManager {
  * @param configs legacy `Record<string, McpServerConfig>` (all stdio) or the
  * richer `Record<string, McpServerConfigEntry>` map.
  * @param ctx transport context (cwd + OAuth host hook); omit → 401 for OAuth.
+ * @param opts timeout / reverse-request flags, or a bare number (= tool timeout,
+ *   back-compat).
  */
   constructor(
     private readonly configs: Record<
@@ -210,20 +232,59 @@ export class McpManager {
       McpServerConfig | McpServerConfigEntry
     > = {},
     private readonly ctx?: McpTransportContext,
-  ) {}
+    opts?: number | McpManagerOptions,
+  ) {
+    if (typeof opts === "number") {
+      this.requestTimeoutMs = opts;
+    } else if (opts) {
+      this.requestTimeoutMs = opts.requestTimeoutMs;
+      this.startupTimeoutMs = opts.startupTimeoutMs;
+      this.clientReverseRequests = opts.clientReverseRequests === true;
+    }
+  }
+
+  private readonly requestTimeoutMs?: number;
+  private readonly startupTimeoutMs?: number;
+  private readonly clientReverseRequests: boolean = false;
 
  /** Start every configured server concurrently. Failures are collected,
  * not thrown. Resolves once every server has either started or failed. */
   async startAll(): Promise<void> {
     await Promise.all(
       Object.entries(this.configs).map(async ([name, cfg]) => {
+        let c: McpClient | null = null;
         try {
-          const c = buildClient(name, cfg as McpServerConfigEntry, this.ctx);
+          c = buildClient(name, cfg as McpServerConfigEntry, this.ctx);
+          const tunable = c as unknown as {
+            setRequestTimeoutMs?: (ms: number) => void;
+            setStartupTimeoutMs?: (ms: number) => void;
+            setClientReverseRequests?: (v: boolean) => void;
+          };
+          // Per-server tool timeout overrides the global tool timeout.
+          const perServer =
+            cfg && typeof cfg === "object" && "timeoutMs" in cfg
+              ? (cfg as { timeoutMs?: number }).timeoutMs
+              : undefined;
+          const toolMs =
+            typeof perServer === "number" && Number.isFinite(perServer)
+              ? perServer
+              : this.requestTimeoutMs;
+          if (toolMs !== undefined) tunable.setRequestTimeoutMs?.(toolMs);
+          if (this.startupTimeoutMs !== undefined) {
+            tunable.setStartupTimeoutMs?.(this.startupTimeoutMs);
+          }
+          if (this.clientReverseRequests) {
+            tunable.setClientReverseRequests?.(true);
+          }
           await c.start();
           this.wireHandler(c);
           this.clients.set(name, c);
         } catch (err) {
-          const message = (err as Error).message ?? String(err);
+          let message = (err as Error).message ?? String(err);
+          const tail = (
+            c as unknown as { getStderrTail?: () => string } | null
+          )?.getStderrTail?.()?.trim() ?? "";
+          if (tail) message = `${message}\n--- stderr (tail) ---\n${tail}`;
           const se: McpStartError = { server: name, message };
           this.startErrs.push(se);
           for (const l of this.errorListeners) {
@@ -269,6 +330,19 @@ export class McpManager {
   listAllPrompts(): McpPromptDescriptor[] {
     const out: McpPromptDescriptor[] = [];
     for (const c of this.clients.values()) out.push(...c.listPrompts());
+    return out;
+  }
+
+  /** Per-server sanitized instructions from initialize (non-empty only). */
+  listAllInstructions(): Array<{ server: string; instructions: string }> {
+    const out: Array<{ server: string; instructions: string }> = [];
+    for (const c of this.clients.values()) {
+      const get = (c as unknown as { getInstructions?: () => string | null }).getInstructions;
+      const text = typeof get === "function" ? get.call(c) : null;
+      if (typeof text === "string" && text.trim()) {
+        out.push({ server: c.serverName, instructions: text.trim() });
+      }
+    }
     return out;
   }
 

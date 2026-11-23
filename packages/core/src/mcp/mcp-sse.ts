@@ -163,6 +163,9 @@ export class McpSseClient extends BaseJsonRpcClient {
   private sseAbort: AbortController | null = null;
  /** Resolved on `stop`. */
   private stopped = false;
+  private everStarted = false;
+  private reconnecting: Promise<void> | null = null;
+  private connected = false;
  /** Pending POSTs keyed by id, so we can match responses that come back on
  * the SSE stream rather than the POST response body. */
   private postInflight = new Map<number | string, {
@@ -205,15 +208,20 @@ export class McpSseClient extends BaseJsonRpcClient {
   async start(): Promise<void> {
     if (this.stopped) throw new Error(`MCP ${this.serverName} already stopped`);
     await this.handshakeAndDiscover();
+    this.everStarted = true;
+    this.connected = true;
  // After initialize, try to open the long-lived event stream. The spec
  // says the server may push an `endpoint` event on the stream; if it
  // does, we record it. If the stream fails, that's OK — the POST path
  // works on its own.
-    this.openEventStream().catch(() => undefined);
+    this.openEventStream().catch(() => {
+      this.connected = false;
+    });
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.connected = false;
     if (this.sseAbort) {
       try {
         this.sseAbort.abort();
@@ -225,16 +233,43 @@ export class McpSseClient extends BaseJsonRpcClient {
     this.failAllPending(new Error(`MCP ${this.serverName} stopped`));
   }
 
+  protected override async ensureConnected(): Promise<void> {
+    if (this.stopped || this.connected || !this.everStarted) return;
+    if (this.reconnecting) return this.reconnecting;
+    this.reconnecting = (async () => {
+      process.stderr.write(`[mcp:${this.serverName}] connection lost — reconnecting\n`);
+      if (this.sseAbort) {
+        try {
+          this.sseAbort.abort();
+        } catch {
+          /* ignore */
+        }
+        this.sseAbort = null;
+      }
+      await this.handshakeAndDiscover();
+      this.connected = true;
+      this.openEventStream().catch(() => {
+        this.connected = false;
+      });
+    })().finally(() => {
+      this.reconnecting = null;
+    });
+    return this.reconnecting;
+  }
+
   protected sendFrame(msg: JsonRpcRequest): void {
     if (this.stopped) throw new Error(`MCP ${this.serverName} is stopped`);
  // Fire-and-await the POST. Errors surface to the pending map as
  // rejections, exactly like a stdio transport would surface a write
  // failure.
     this.postJson(msg).catch((err) => {
-      const p = this.pending.get(msg.id);
-      if (p) {
-        this.pending.delete(msg.id);
-        p.reject(err instanceof Error ? err : new Error(String(err)));
+      this.connected = false;
+      if (msg.id !== undefined && msg.id !== null) {
+        const p = this.pending.get(msg.id);
+        if (p) {
+          this.pending.delete(msg.id);
+          p.reject(err instanceof Error ? err : new Error(String(err)));
+        }
       }
     });
   }
@@ -262,13 +297,18 @@ export class McpSseClient extends BaseJsonRpcClient {
       }
       return res;
     })().catch((err) => {
-      const p = this.pending.get(msg.id);
-      if (p) {
-        this.pending.delete(msg.id);
-        p.reject(err instanceof Error ? err : new Error(String(err)));
-      }
+      this.rejectPending(msg.id, err instanceof Error ? err : new Error(String(err)));
       throw err;
     });
+  }
+
+  private rejectPending(id: string | number | undefined, err: Error): void {
+    if (id === undefined || id === null) return;
+    const p = this.pending.get(id);
+    if (p) {
+      this.pending.delete(id);
+      p.reject(err);
+    }
   }
 
  /** A single POST attempt. Dispatches the response body to `onMessage`
@@ -330,34 +370,23 @@ export class McpSseClient extends BaseJsonRpcClient {
               this.onMessage(parsed);
             } catch {
  // Not a JSON-RPC envelope — reject the pending entry.
-              const p = this.pending.get(msg.id);
-              if (p) {
-                this.pending.delete(msg.id);
-                p.reject(
-                  new Error(
-                    `MCP ${this.serverName} returned non-JSON response: ${out.slice(0, 200)}`
-                  )
-                );
-              }
+              this.rejectPending(
+                msg.id,
+                new Error(
+                  `MCP ${this.serverName} returned non-JSON response: ${out.slice(0, 200)}`,
+                ),
+              );
             }
           }
           resolve({ status: res.statusCode ?? 0, body: out, contentType, wwwAuthenticate: wwwAuth });
         });
         res.on("error", (err) => {
-          const p = this.pending.get(msg.id);
-          if (p) {
-            this.pending.delete(msg.id);
-            p.reject(err);
-          }
+          this.rejectPending(msg.id, err);
           reject(err);
         });
       });
       req.on("error", (err) => {
-        const p = this.pending.get(msg.id);
-        if (p) {
-          this.pending.delete(msg.id);
-          p.reject(err);
-        }
+        this.rejectPending(msg.id, err);
         reject(err);
       });
       req.write(body);

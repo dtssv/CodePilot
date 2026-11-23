@@ -85,6 +85,8 @@ export interface PendingPermission {
   toolName: string;
   input: unknown;
   reason: string;
+  /** Live-disk before/after preview for write/edit/apply_patch. */
+  preview?: string;
 }
 
 export interface TuiState {
@@ -127,7 +129,7 @@ export interface TuiState {
 }
 
 export type Row =
-  | { kind: "user"; id: string; text: string }
+  | { kind: "user"; id: string; text: string; steer?: boolean }
   | { kind: "assistant"; msg: MessageRow }
   | { kind: "tool"; tool: ToolRow }
   | { kind: "plan"; plan: PlanStep[]; at: number }
@@ -502,14 +504,20 @@ export function reducer(state: TuiState, action: TuiAction): TuiState {
  // Core notifies a placeholder bubble first and re-sends the final
  // content under the same id, so upsert rather than append.
             const at = state.rows.findIndex((r) => r.kind === "user" && r.id === ev.id);
+            const userRow = {
+              kind: "user" as const,
+              id: ev.id,
+              text,
+              ...(ev.steer ? { steer: true as const } : {}),
+            };
             if (at >= 0) {
               const rows = state.rows.slice();
-              rows[at] = { kind: "user", id: ev.id, text };
+              rows[at] = userRow;
               return { ...state, rows };
             }
             return {
               ...state,
-              rows: [...state.rows, { kind: "user", id: ev.id, text }],
+              rows: [...state.rows, userRow],
             };
           }
  // Assistant final message: either update the streaming row in place

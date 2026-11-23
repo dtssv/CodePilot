@@ -142,8 +142,8 @@ export async function readLayeredProjectMemory(
   return layers.join("\n\n---\n\n");
 }
 
-/** Default byte budget for injected workspace instructions (Codex uses the
- * same 32 KiB `project_doc_max_bytes`). */
+/** Default byte budget for injected workspace instructions: large enough for
+ * real docs, small enough to keep the prompt prefix lean. */
 export const PROJECT_INSTRUCTIONS_MAX_BYTES = 32 * 1024;
 
 /**

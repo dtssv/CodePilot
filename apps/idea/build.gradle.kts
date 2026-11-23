@@ -91,7 +91,8 @@ intellijPlatform {
         // 241 floor for the inline (Tab) completion API.
         ideaVersion {
             sinceBuild = "241"
-            untilBuild = "251.*"
+            // 262 = IntelliJ IDEA 2026.2 (YYMM build number).
+            untilBuild = "262.*"
         }
     }
 

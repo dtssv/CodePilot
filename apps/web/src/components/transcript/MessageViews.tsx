@@ -19,6 +19,7 @@ import {
   SparkIcon,
   UsersIcon,
 } from "../Icons.js";
+import { Markdown } from "../Markdown.js";
 import type { Density } from "./types.js";
 
 /** Thumbnails; click opens the full image in a new tab. */
@@ -97,9 +98,36 @@ export function ReasoningBlock({ text, streaming }: { text: string; streaming: b
   );
 }
 
+/** Mid-run inject — left-aligned chip inside the turn, not a chat bubble. */
+export function SteerChip({
+  text,
+  density,
+}: {
+  text: string;
+  density: Density;
+}): React.ReactElement | null {
+  const body = text.trim();
+  if (!body) return null;
+  return (
+    <div
+      className={`flex animate-fade-in items-start gap-2 rounded-lg border border-[var(--color-accent)]/35 bg-[var(--color-accent-dim)]/60 px-2.5 py-1.5 ${
+        density === "compact" ? "text-[12px]" : "text-[12.5px]"
+      }`}
+    >
+      <span className="mt-0.5 shrink-0 rounded bg-[var(--color-accent)]/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--color-accent)]">
+        {t("Injected")}
+      </span>
+      <span className="min-w-0 flex-1 whitespace-pre-wrap leading-5 text-[var(--color-ink)]">{body}</span>
+    </div>
+  );
+}
+
 export function MessageView({ msg, density }: { msg: MessageRow; density: Density }): React.ReactElement | null {
  // Assistant text is rendered inside AssistantTurnView (one avatar per Q&A).
   if (msg.role !== "user") return null;
+  if (msg.steer) {
+    return <SteerChip text={scrubUploadNote(msg.text)} density={density} />;
+  }
   return (
     <div className="flex animate-fade-in flex-col items-end gap-1.5">
       {msg.images && msg.images.length > 0 && <ImageStrip images={msg.images} />}
@@ -284,12 +312,16 @@ export function CompactionNote({ summary, foldKind }: { summary: string; foldKin
         </Divider>
       </button>
       {open && (
-        <div className="mt-2 rounded-lg bg-[var(--color-surface-sunken)] p-3 text-[12px] text-[var(--color-ink-dim)]">
-          {/* Preserve numbered section headers (`1. USER REQUESTS`) verbatim —
-              Markdown list parsing would strip/renumber them. */}
-          <pre className="m-0 max-h-96 overflow-auto whitespace-pre-wrap font-sans text-[12px] leading-[1.55] text-[var(--color-ink-dim)]">
-            {summary}
-          </pre>
+        <div className="mt-2 max-h-96 overflow-auto rounded-lg bg-[var(--color-surface-sunken)] p-3 text-[12px] text-[var(--color-ink-dim)]">
+          {microFold ? (
+            <pre className="m-0 whitespace-pre-wrap font-sans text-[12px] leading-[1.55] text-[var(--color-ink-dim)]">
+              {summary}
+            </pre>
+          ) : (
+            <div className="cp-md text-[12.5px] leading-[1.55] text-[var(--color-ink-dim)] [&_.cp-md]:text-[12.5px]">
+              <Markdown text={summary} final />
+            </div>
+          )}
         </div>
       )}
     </div>

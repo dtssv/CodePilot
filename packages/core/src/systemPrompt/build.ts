@@ -95,8 +95,8 @@ function modeGuidance(mode: AgentMode, _toolNames: string[]): string {
     case "plan":
       return [
         "**Mode: \`plan\` (read-only exploration + planning).**",
-        "- Read-only tools plus \`plan_update\` / \`plan_done\` / \`memory_write\` (explicit remember only). No \`bash\` / writes / \`task\`.",
-        "- Surface unknowns; when ready call \`plan_done\` with a one-paragraph summary.",
+        "- Read-only tools plus \`plan\` / \`memory_write\` (explicit remember only). No \`bash\` / writes / \`task\`.",
+        "- Surface unknowns; when ready call \`plan\` with \`action: \"done\"\` and a one-paragraph summary.",
       ].join("\n");
     case "agent":
     default:

@@ -239,9 +239,6 @@ export function SkillsSection({
                   </button>
                 </div>
               )}
-              <p className="mb-1 text-[11px] text-[var(--color-ink-faint)]">
-                {t("Switch files to edit templates / references next to SKILL.md. Use Add file for new paths.")}
-              </p>
               <textarea
                 className="cp-input mt-1 min-h-56 w-full font-mono text-[11.5px]"
                 value={skillMarkdown}

@@ -64,6 +64,7 @@ export interface PendingPermission {
   toolName: string;
   input: unknown;
   reason: string;
+  preview?: string;
 }
 
 /**

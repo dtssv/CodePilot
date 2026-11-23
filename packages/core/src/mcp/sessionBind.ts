@@ -23,6 +23,7 @@ import { loadConfigWithSources } from "../config/config.js";
 import { projectStatePath } from "../workspace/projectState.js";
 import type { McpServerRequestHandler } from "./mcp-types.js";
 import type { ToolRegistry } from "../tools/types.js";
+import { spillHeadTail } from "../tools/_shared.js";
 import type { CodepilotConfig, SessionOptions } from "../types.js";
 
 /** Server names defined in PROJECT-scoped files (`<cwd>/.codepilot/config.json`
@@ -196,12 +197,21 @@ export async function startMcp(host: SessionMcpHost): Promise<McpManager | null>
   if (Object.keys(active).length === 0) return null;
   let mcp: McpManager | null = null;
   try {
-    mcp = await acquireSharedMcp(active, {
-      cwd: host.cwd,
-      openAuthUrl: host.onMcpOpenAuthUrl ?? null,
-      sandbox: host.config.sandbox ?? {},
-      mcpSandbox: host.config.mcpSandbox,
-    });
+    mcp = await acquireSharedMcp(
+      active,
+      {
+        cwd: host.cwd,
+        openAuthUrl: host.onMcpOpenAuthUrl ?? null,
+        sandbox: host.config.sandbox ?? {},
+        mcpSandbox: host.config.mcpSandbox,
+      },
+      {
+        requestTimeoutMs: host.config.mcpToolTimeoutMs,
+        startupTimeoutMs: host.config.mcpStartupTimeoutMs,
+        // Shared pool may serve sessions that handle reverse requests.
+        clientReverseRequests: true,
+      },
+    );
     if (!mcp) return null;
     // The session's reverse-request handler. Captured here so the tool wrappers
     // can tag their invocations with it, giving a server's reverse request
@@ -298,12 +308,23 @@ function registerMcpTool(
         jsonSchema: t.inputSchema,
         ...(destructive ? { destructiveHint: true } : {}),
       },
-      execute: async (input) => {
+      execute: async (input, ctx) => {
         const args = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
         // Pass this session's reverse-request handler so a reverse request the
         // server initiates during this call routes back to this session.
         const r = await mgr.invoke(t.server, t.name, args, requestHandler ?? null);
-        return { content: r.content, isError: r.isError };
+        // Same spill policy as bash/task: large MCP payloads stay available via
+        // artifact while the model sees a bounded head+tail view.
+        const spilled = await spillHeadTail(
+          ctx,
+          r.content,
+          `mcp:${t.server}:${t.name}`,
+        );
+        return {
+          content: spilled.content,
+          isError: r.isError,
+          ...(spilled.artifactRef ? { artifactRef: spilled.artifactRef } : {}),
+        };
       },
     })
   );

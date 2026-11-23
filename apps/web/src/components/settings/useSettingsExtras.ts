@@ -651,8 +651,8 @@ export function useSettingsExtras({
     return providerId ? { model, providerId } : { model };
   };
 
-  const addIdle = async (): Promise<void> => {
-    if (!idlePrompt.trim()) return;
+  const addIdle = async (): Promise<boolean> => {
+    if (!idlePrompt.trim()) return false;
     setBusy(true);
     try {
       const { model, providerId } = parseIdleModel();
@@ -682,8 +682,10 @@ export function useSettingsExtras({
           ? t("Idle task queued — runs when the engine is free.")
           : t("Scheduled task saved."),
       );
+      return true;
     } catch (err) {
       setError(describeError(err));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -733,8 +735,8 @@ export function useSettingsExtras({
     setTaskOnceAt("");
   };
 
-  const saveEditIdle = async (): Promise<void> => {
-    if (!editingTaskId || !idlePrompt.trim()) return;
+  const saveEditIdle = async (): Promise<boolean> => {
+    if (!editingTaskId || !idlePrompt.trim()) return false;
     setBusy(true);
     try {
       const { model, providerId } = parseIdleModel();
@@ -757,8 +759,10 @@ export function useSettingsExtras({
       cancelEditIdle();
       await reload();
       setNotice(t("Idle task updated."));
+      return true;
     } catch (err) {
       setError(describeError(err));
+      return false;
     } finally {
       setBusy(false);
     }

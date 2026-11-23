@@ -173,6 +173,24 @@ export function recordPendingGoal(
   return true;
 }
 
+/** Queue a goal on a live session: start now when idle, else run at the next
+ * idle status (same path as `start_goal`). */
+export function queueSessionGoal(
+  ctx: ServerContext,
+  session: Session,
+  req: { objective: string; maxRounds?: number },
+): { accepted: true; running: boolean } {
+  if (ctx.activeGoalLoops.has(session.id)) {
+    // Replace any pending objective so the next idle takes the latest ask.
+    recordPendingGoal(ctx, session.id, req);
+    return { accepted: true, running: true };
+  }
+  recordPendingGoal(ctx, session.id, req);
+  const busy = typeof session.isBusy === "function" && session.isBusy();
+  if (!busy) maybeStartGoalLoop(ctx, session);
+  return { accepted: true, running: ctx.activeGoalLoops.has(session.id) };
+}
+
 /**
  * On a turn settling idle: if this session has a pending goal and no loop is
  * driving, consume it and start `driveGoalRounds`. `activeGoalLoops` guards
@@ -321,6 +339,8 @@ export async function requestPermissionFromClient(
     input: req.input,
     reason: req.reason,
     ...(req.sandboxExpand ? { sandboxExpand: req.sandboxExpand } : {}),
+    ...(req.sandboxEscalation ? { sandboxEscalation: true as const } : {}),
+    ...(req.preview ? { preview: req.preview } : {}),
   };
   return new Promise<PermissionResolution>((settle) => {
     const p: PendingPrompt = { kind: "permission", params, settle, declined: new Set() };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildSubagentToolRegistry } from "../src/tools/subagentTools.js";
+import { buildSubagentToolRegistry, narrowSubagentTools } from "../src/tools/subagentTools.js";
 
 describe("buildSubagentToolRegistry", () => {
   it("gives explore sub-agents read + network research tools (incl. web_fetch)", () => {
@@ -39,10 +39,10 @@ describe("buildSubagentToolRegistry", () => {
     }
   });
 
-  it("never exposes plan_update, memory_write, or task to sub-agents", () => {
+  it("never exposes plan/goal/memory_write/task to sub-agents", () => {
     for (const type of ["explore", "plan", "worker"] as const) {
       const names = new Set(buildSubagentToolRegistry(type).all().map((t) => t.name));
-      for (const n of ["plan_update", "memory_write", "task"]) {
+      for (const n of ["plan", "goal", "memory_write", "task"]) {
         expect(names.has(n)).toBe(false);
       }
     }
@@ -63,5 +63,33 @@ describe("buildSubagentToolRegistry", () => {
       const names = new Set(buildSubagentToolRegistry(type).all().map((t) => t.name));
       expect(names.has("lsp_navigate")).toBe(false);
     }
+  });
+
+  it("narrowSubagentTools drops out-of-pool names without failing", () => {
+    const pool = buildSubagentToolRegistry("explore");
+    const { registry, dropped } = narrowSubagentTools(pool, [
+      "bash",
+      "read_file",
+      "grep",
+    ]);
+    expect(dropped).toEqual(["bash"]);
+    const names = new Set(registry.names());
+    expect(names.has("read_file")).toBe(true);
+    expect(names.has("grep")).toBe(true);
+    expect(names.has("bash")).toBe(false);
+  });
+
+  it("narrowSubagentTools falls back to the full pool when every name is out-of-pool", () => {
+    const pool = buildSubagentToolRegistry("explore");
+    const { registry, dropped } = narrowSubagentTools(pool, ["bash", "write_file"]);
+    expect(dropped).toEqual(["bash", "write_file"]);
+    expect(registry.names().sort()).toEqual(pool.names().sort());
+  });
+
+  it("narrowSubagentTools keeps a worker subset when names are in-pool", () => {
+    const pool = buildSubagentToolRegistry("worker");
+    const { registry, dropped } = narrowSubagentTools(pool, ["bash", "read_file"]);
+    expect(dropped).toEqual([]);
+    expect(new Set(registry.names())).toEqual(new Set(["bash", "read_file"]));
   });
 });

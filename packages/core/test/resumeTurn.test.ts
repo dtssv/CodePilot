@@ -144,4 +144,33 @@ describe("Session.resumeLastTurn", () => {
     expect(session.canResumeLastTurn()).toBe(false);
     expect(await session.resumeLastTurn()).toBe("noop");
   });
+
+  it("still resumes when a model event follows the error (bookkeeping)", async () => {
+    dir = mkdtempSync(join(tmpdir(), "resume-model-"));
+    let streamCalls = 0;
+    const provider: ChatProvider = {
+      name: "mock",
+      defaultModel: "mock",
+      smallModel: "mock",
+      async *stream(): AsyncIterable<StreamEvent> {
+        streamCalls += 1;
+        if (streamCalls === 1) {
+          yield { kind: "error", message: "boom" };
+          return;
+        }
+        yield { kind: "text_delta", messageId: "m2", text: "ok" };
+        yield { kind: "done", finishReason: "stop" };
+      },
+    };
+    session = makeSession(provider, `resume_model_${Date.now()}`);
+    await session.init();
+    await session.setTitle("resume-model");
+    await session.prompt("go");
+    // Simulate a post-error model sync (as the UI syncEndpoint does).
+    await session.setEndpoint({ model: "mock-model" });
+    expect(session.canResumeLastTurn()).toBe(true);
+    expect(await session.resumeLastTurn()).toBe("started");
+    expect(streamCalls).toBe(2);
+    expect(userTexts(session.getHistory())).toEqual(["go"]);
+  });
 });

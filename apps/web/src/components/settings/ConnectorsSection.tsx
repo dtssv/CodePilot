@@ -66,8 +66,6 @@ export function ConnectorsSection({
 }: ConnectorsSectionProps): React.ReactElement {
   return (
         <div className="space-y-3">
-          <p className="text-[12px] leading-5 text-[var(--color-ink-dim)]">
-          </p>
           <div className="flex flex-wrap items-center gap-2">
             <input
               className="cp-input min-w-[12rem] flex-1 text-[12.5px]"
@@ -215,9 +213,6 @@ export function ConnectorsSection({
                   </div>
                   {editCredentials && (
                     <div className="mt-3 border-t border-[var(--color-edge-subtle)] pt-3">
-                      <p className="mb-2 text-[11.5px] text-[var(--color-ink-faint)]">
-                        {t("Leave blank to keep current value")}
-                      </p>
                       {selected.credentials.map((f) => (
                         <label key={f.key} className="mb-2 block">
                           <span className="cp-eyebrow">{f.label}</span>

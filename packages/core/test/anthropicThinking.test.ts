@@ -161,7 +161,7 @@ describe("AnthropicProvider extended thinking", () => {
     expect(body?.thinking).toEqual({ type: "enabled", budget_tokens: 24_000 });
   });
 
-  it("merges a trailing system message into the preceding user turn (no consecutive user roles)", async () => {
+  it("lifts runtime_context into an uncached system tail (not into the user turn)", async () => {
     let body: Record<string, unknown> | undefined;
     vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
       body = JSON.parse(init.body as string);
@@ -175,9 +175,10 @@ describe("AnthropicProvider extended thinking", () => {
     await collect(
       p.stream({
         model: "claude-sonnet-4-5",
+        systemPrompt: "policy",
         messages: [
-          // Harness runtime-context emitted as its own system message, placed
-          // before the user turn.
+          // Harness runtime-context as its own system message (before or after
+          // the user turn) — must not rewrite conversation history.
           { role: "system", content: [{ type: "text", text: "<runtime_context>now</runtime_context>" }] },
           { role: "user", content: [{ type: "text", text: "ping" }] },
         ],
@@ -185,17 +186,17 @@ describe("AnthropicProvider extended thinking", () => {
     );
 
     const msgs = body?.messages as Array<{ role: string; content: Array<{ text?: string }> }>;
-    // Anthropic forbids two consecutive user messages; the system→user promotion
-    // must be merged into one user message with both text blocks, context first.
     expect(msgs).toHaveLength(1);
     expect(msgs[0]!.role).toBe("user");
-    expect(msgs[0]!.content).toHaveLength(2);
-    expect(msgs[0]!.content[0]!.text).toContain("<runtime_context>");
-    expect(msgs[0]!.content[1]!.text).toBe("ping");
-    // No two adjacent messages share a role.
-    for (let i = 1; i < msgs.length; i++) {
-      expect(msgs[i]!.role).not.toBe(msgs[i - 1]!.role);
-    }
+    expect(msgs[0]!.content).toHaveLength(1);
+    expect(msgs[0]!.content[0]!.text).toBe("ping");
+    const sys = body?.system as Array<{ text?: string; cache_control?: unknown }>;
+    expect(sys.length).toBeGreaterThanOrEqual(2);
+    expect(sys[0]!.text).toBe("policy");
+    expect(sys[0]!.cache_control).toEqual({ type: "ephemeral" });
+    const runtime = sys[sys.length - 1]!;
+    expect(runtime.text).toContain("<runtime_context>");
+    expect(runtime.cache_control).toBeUndefined();
   });
 
   it("caches the stable conversation-history prefix (3rd breakpoint), not the volatile tail", async () => {

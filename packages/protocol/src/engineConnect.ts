@@ -4,7 +4,7 @@
  * IDEA / TUI) share one local protocol server.
  */
 
-import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import type { ChildProcess, SpawnOptions } from "node:child_process";
 import { createConnection } from "node:net";
 
 import {
@@ -14,8 +14,16 @@ import {
   clearServeInfo,
   type ServeInfo,
 } from "./serve-info.js";
+import { spawnOrphanDaemon } from "./orphanDaemon.js";
 
 export { readLiveServeInfo, serveInfoWsUrl, type ServeInfo };
+export {
+  spawnOrphanDaemon,
+  buildOrphanLaunch,
+  shellQuoteUnix,
+  shellQuoteWin,
+  type OrphanSpawnOptions,
+} from "./orphanDaemon.js";
 
 export type Spawner = (
   command: string,
@@ -79,14 +87,15 @@ export interface DiscoverOrSpawnOptions {
 
 export interface DiscoverOrSpawnResult {
   info: ServeInfo;
-  /** Child we spawned (null when we attached to an existing daemon). */
+  /** Set only when a custom `spawner` was injected (tests). The default orphan
+   * spawn never owns the daemon, so clients keep no IDE-child handle. */
   owned: ChildProcess | null;
 }
 
 /**
- * Prefer an already-running loopback daemon; otherwise spawn one and wait for
- * its lockfile. Do not kill `owned` on one client leaving — other UIs may share
- * it; the daemon exits on idle grace after the last client leaves.
+ * Prefer an already-running loopback daemon; otherwise orphan-spawn one and
+ * wait for its lockfile. Do not kill the daemon on one client leaving — other
+ * UIs may share it; the daemon exits on idle grace after the last client leaves.
  */
 export async function discoverOrSpawnDaemon(
   opts: DiscoverOrSpawnOptions,
@@ -139,44 +148,45 @@ export async function discoverOrSpawnDaemon(
     }
   }
 
-  // Default spawner: `detached: true` makes the child a new session leader via
-  // setsid(2) on Unix (Node/libuv) so it survives TUI/Desktop/IDE parent exit.
-  // Do not wrap with the `setsid` CLI — it is Linux-only (ENOENT on macOS).
-  // Tests pass a custom `spawner` and keep the plain spawn path.
-  const defaultSpawner: Spawner = (command, args, options) =>
-    spawn(command, args, { ...options, detached: true });
-  const spawner = opts.spawner ?? defaultSpawner;
-  const child = spawner(opts.command, [...opts.args], {
-    cwd: opts.cwd,
-    env: opts.env,
-    stdio: ["ignore", "ignore", "pipe"],
-    detached: true,
-  });
-  // Drain the piped stderr so a chatty daemon can never block on a full pipe
-  // whose reader (this parent) outlives the spawn. We don't forward it.
-  try {
-    child.stderr?.resume();
-  } catch {
-    /* ignore */
-  }
-  // Detach so one client exiting does not take the shared daemon with it
-  // while other UIs may still be connected. Idle grace stops it later.
-  try {
-    child.unref();
-  } catch {
-    /* ignore */
-  }
-
-  const info = await waitForLiveServeInfo(opts.waitMs ?? 15_000);
-  if (!info) {
+  // Custom spawner (tests): keep a direct child handle for assertions.
+  // Default: orphan spawn so the daemon is never an IDE/Electron child.
+  if (opts.spawner) {
+    const child = opts.spawner(opts.command, [...opts.args], {
+      cwd: opts.cwd,
+      env: opts.env,
+      stdio: ["ignore", "ignore", "pipe"],
+      detached: true,
+    });
     try {
-      child.kill();
+      child.stderr?.resume();
     } catch {
       /* ignore */
     }
+    try {
+      child.unref();
+    } catch {
+      /* ignore */
+    }
+    const info = await waitForLiveServeInfo(opts.waitMs ?? 15_000);
+    if (!info) {
+      try {
+        child.kill();
+      } catch {
+        /* ignore */
+      }
+      throw new Error(
+        `CodePilot daemon did not publish ~/.codepilot/serve.json after starting \`${opts.command} ${opts.args.join(" ")}\``,
+      );
+    }
+    return { info, owned: child };
+  }
+
+  spawnOrphanDaemon(opts.command, opts.args, { cwd: opts.cwd, env: opts.env });
+  const info = await waitForLiveServeInfo(opts.waitMs ?? 15_000);
+  if (!info) {
     throw new Error(
       `CodePilot daemon did not publish ~/.codepilot/serve.json after starting \`${opts.command} ${opts.args.join(" ")}\``,
     );
   }
-  return { info, owned: child };
+  return { info, owned: null };
 }

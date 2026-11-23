@@ -1,7 +1,7 @@
-// start_goal: model escalates the current task into a long-horizon goal loop.
+// goal action=start: model escalates the current task into a long-horizon goal loop.
 
 import { describe, it, expect, vi } from "vitest";
-import { startGoalTool } from "../src/tools/start_goal.js";
+import { goalTool } from "../src/tools/goal.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 function ctx(over: Partial<ToolContext> = {}): ToolContext {
@@ -21,19 +21,19 @@ function goalRequest(blocks: Array<{ type: string; text: string }> | undefined) 
     : null;
 }
 
-describe("start_goal", () => {
+describe("goal action=start", () => {
   it("no host handle → degrades to a no-op ack, no goal_request block", async () => {
-    const tool = { ...startGoalTool };
+    const tool = { ...goalTool };
     tool.onStartGoal = undefined;
-    const r = await tool.execute({ objective: "do a big thing" }, ctx());
+    const r = await tool.execute({ action: "start", objective: "do a big thing" }, ctx());
     expect(r.content).toMatch(/not available/i);
     expect(r.blocks).toBeUndefined();
   });
 
   it("host accepts → emits a goal_request block with the objective", async () => {
     const onStartGoal = vi.fn(async () => true);
-    const tool = { ...startGoalTool, onStartGoal };
-    const r = await tool.execute({ objective: "migrate auth module" }, ctx());
+    const tool = { ...goalTool, onStartGoal };
+    const r = await tool.execute({ action: "start", objective: "migrate auth module" }, ctx());
     expect(onStartGoal).toHaveBeenCalledWith("migrate auth module", 50, undefined);
     const gr = goalRequest(r.blocks);
     expect(gr?.type).toBe("goal_request");
@@ -41,16 +41,16 @@ describe("start_goal", () => {
   });
 
   it("host declines → no goal_request block, model told to continue", async () => {
-    const tool = { ...startGoalTool, onStartGoal: async () => false };
-    const r = await tool.execute({ objective: "x" }, ctx());
+    const tool = { ...goalTool, onStartGoal: async () => false };
+    const r = await tool.execute({ action: "start", objective: "x" }, ctx());
     expect(r.blocks).toBeUndefined();
     expect(r.content).toMatch(/did not start|continue/i);
   });
 
   it("carries maxRounds and reason when provided", async () => {
-    const tool = { ...startGoalTool, onStartGoal: async () => true };
+    const tool = { ...goalTool, onStartGoal: async () => true };
     const r = await tool.execute(
-      { objective: "big job", maxRounds: 30, reason: "many steps" },
+      { action: "start", objective: "big job", maxRounds: 30, reason: "many steps" },
       ctx(),
     );
     const gr = goalRequest(r.blocks);

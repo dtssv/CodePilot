@@ -29,6 +29,8 @@ export interface TranscriptProps {
   /** Insert a code block into the IDE editor (embedded only). When set, code
    * blocks show an "Insert" action; returns false if the host declined. */
   onInsertCode?: (text: string) => boolean;
+  /** Quote selected transcript text into the composer. */
+  onAddToChat?: (text: string) => void;
   /** The scroll container that wraps this transcript. When provided, drilling
    * into a sub-agent and back restores each view's own scroll position instead
    * of leaking the sub-agent's scroll offset onto the main task view. */

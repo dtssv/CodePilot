@@ -14,6 +14,9 @@ export interface PendingPermission {
   reason: string;
  /** Out-of-sandbox write: allow adds this folder (always also persists). */
   sandboxExpand?: { path: string };
+  sandboxEscalation?: true;
+  /** Live-disk before/after preview for write/edit/apply_patch. */
+  preview?: string;
 }
 
 /** Context-window usage report (mirrors core Session.contextReport). */
@@ -91,6 +94,8 @@ export interface ModelCapabilities {
   contextWindow: number;
   modalities: ModelModality[];
   maxOutputTokens?: number;
+  /** When set, overrides id heuristics for the thinking-effort UI. */
+  reasoningEffortChoices?: Array<"off" | "low" | "medium" | "high">;
 }
 
 export interface RemoteModelInfo {

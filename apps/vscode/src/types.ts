@@ -92,6 +92,8 @@ export interface PermissionRequestParams {
   toolName: string;
   input: unknown;
   reason: string;
+  sandboxExpand?: { path: string };
+  preview?: string;
 }
 
 /** Server -> client `session/usage` notification payload. */

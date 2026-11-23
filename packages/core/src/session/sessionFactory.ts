@@ -198,7 +198,7 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
         log.warn(`plugin config merge failed — ${(err as Error).message}`);
       }
       try {
-        const paths = pluginResourcePaths(init.plugins);
+        const paths = pluginResourcePaths(init.plugins, (m) => log.warn(m), trust);
         if (paths.skills.length > 0) {
           pluginSkillDirs = [...(pluginSkillDirs ?? []), ...paths.skills];
         }
@@ -239,7 +239,7 @@ export async function createSession(opts: SessionOptions): Promise<Session> {
     pluginSkillDirs,
     pluginAgentDirs,
  // Empty string forces Session to keep config.model; avoid inventing a
- // vendor id the user never configured (was "claude-sonnet-4-5").
+  // vendor id the user never configured.
     model: resolvedModel || config.model || "",
   });
   await session.init();

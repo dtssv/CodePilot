@@ -10,6 +10,20 @@ import type { TransportOpener } from "./client.js";
 
 export type HostKind = "vscode" | "idea";
 
+/** UI prefs shared across webviews of the *same* client (Settings ≠ chat).
+ * Never written to ~/.codepilot. */
+export type HostUiPrefs = {
+  /** light | dark | system (follow IDE / OS). */
+  theme?: "light" | "dark" | "system";
+  /** Named palette id (e.g. "default", "nord"). */
+  themeName?: string;
+  locale?: string;
+  /** VS Code chat dock: left | right | top | bottom. */
+  panelPosition?: "left" | "right" | "top" | "bottom";
+  /** Last-used model sticky across webviews / reloads. */
+  endpoint?: { providerId: string; model: string; cwd?: string };
+};
+
 export type HostToUi =
   | { type: "rpc"; line: string }
   | {
@@ -21,14 +35,24 @@ export type HostToUi =
       theme?: "light" | "dark";
       locale?: string;
       surface?: HostKind;
+      /** Extension-persisted prefs (survives dual-webview localStorage split). */
+      prefs?: HostUiPrefs;
     }
   | { type: "host/engine"; state: "starting" | "ready" | "stopped"; error?: string }
   | { type: "host/theme"; theme: "light" | "dark" }
-  | { type: "host/prompt"; text: string; send?: boolean }
+  /** Push prefs from another webview / extension globalState. */
+  | { type: "host/prefs"; prefs: HostUiPrefs }
+  | {
+      type: "host/prompt";
+      text?: string;
+      send?: boolean;
+      /** Structured refs (same chip form as @file). */
+      refs?: Array<{ path: string; startLine?: number; endLine?: number }>;
+    }
   | { type: "host/command"; name: "new" | "cancel" }
   | { type: "host/command"; name: "mode"; mode: AgentMode }
-  /** Host asks the UI to open the in-panel Settings sheet (same webview). */
-  | { type: "host/openSettings" };
+  /** Host asks the UI to open its Settings surface, optionally on [section]. */
+  | { type: "host/openSettings"; section?: string };
 
 export type UiToHost =
   | { type: "rpc"; line: string }
@@ -42,9 +66,11 @@ export type UiToHost =
   /** Tell the IDE host which workspace folder is active (multi-root pick). */
   | { type: "setCwd"; cwd: string }
   /** Ask the IDE to expand/focus this chat panel before showing in-panel settings. */
-  | { type: "openSettings" }
+  | { type: "openSettings"; section?: string }
   /** Settings sheet closed — host may restore the prior IDE layout. */
-  | { type: "closeSettings" };
+  | { type: "closeSettings" }
+  /** Persist + broadcast UI prefs to sibling IDE webviews. */
+  | { type: "prefs/set"; prefs: HostUiPrefs };
 
 declare global {
   interface Window {

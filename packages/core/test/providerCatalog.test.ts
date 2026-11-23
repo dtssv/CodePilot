@@ -130,6 +130,33 @@ describe("applyProviderAndModel", () => {
     expect(next.config.contextWindow).toBe(200_000);
     expect(next.config.maxTokens).toBe(32_000);
   });
+
+  it("drops a peer model's injected contextWindow when the new model has no caps", () => {
+    const cfg: ResolvedCodepilotConfig = {
+      provider: "openai",
+      baseURL: "https://api.example.com/v1",
+      model: "big-model",
+      contextWindow: 1_000_000,
+      providers: {
+        custom: {
+          provider: "openai",
+          baseURL: "https://api.example.com/v1",
+          model: "big-model",
+          models: ["big-model", "tiny-model"],
+          modelCapabilities: {
+            "big-model": {
+              contextWindowMax: 1_000_000,
+              contextWindow: 1_000_000,
+              modalities: ["text"],
+            },
+          },
+        },
+      },
+    };
+    const next = applyProviderAndModel(cfg, "custom", "tiny-model");
+    expect(next.model).toBe("tiny-model");
+    expect(next.config.contextWindow).toBe(200_000);
+  });
 });
 
 describe("model capabilities from /models", () => {
@@ -220,9 +247,9 @@ describe("templates", () => {
     const preset = templateToPreset(PROVIDER_TEMPLATES.find((t) => t.id === "deepseek")!);
     expect(preset.provider).toBe("openai");
     expect(preset.baseURL).toContain("deepseek");
-    const claudeCustom = PROVIDER_TEMPLATES.find((t) => t.id === "custom-anthropic")!;
-    expect(claudeCustom.provider).toBe("anthropic");
-    expect(claudeCustom.requiresBaseURL).toBe(true);
+    const anthropicCustom = PROVIDER_TEMPLATES.find((t) => t.id === "custom-anthropic")!;
+    expect(anthropicCustom.provider).toBe("anthropic");
+    expect(anthropicCustom.requiresBaseURL).toBe(true);
   });
 
   it("allocates unique endpoint ids for multiple keys", () => {

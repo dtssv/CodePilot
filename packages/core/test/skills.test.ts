@@ -28,23 +28,23 @@ function writeSkill(
 }
 
 describe("compat skill dirs", () => {
-  it("discovers .claude/skills and .agents/skills", async () => {
+  it("discovers .claude/skills and .agents/skills (compat roots)", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "sk-compat-"));
-    writeSkill(join(cwd, ".claude", "skills"), "from-claude", "body", "name: from-claude\ndescription: c");
+    writeSkill(join(cwd, ".claude", "skills"), "from-compat", "body", "name: from-compat\ndescription: c");
     writeSkill(join(cwd, ".agents", "skills"), "from-agents", "body", "name: from-agents\ndescription: a");
     const skills = await discoverSkills(cwd, { includeCompatDirs: true, builtinDir: join(cwd, "_nobuiltin") });
     const names = skills.map((s) => s.name);
-    expect(names).toContain("from-claude");
+    expect(names).toContain("from-compat");
     expect(names).toContain("from-agents");
-    expect(skills.find((s) => s.name === "from-claude")?.source).toBe("compat");
+    expect(skills.find((s) => s.name === "from-compat")?.source).toBe("compat");
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  it("discovers .opencode/skills (ecosystem-compatible root)", async () => {
+  it("discovers .opencode/skills (compat root)", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "sk-oc-"));
-    writeSkill(join(cwd, ".opencode", "skills"), "from-oc", "body", "name: from-oc\ndescription: oc");
+    writeSkill(join(cwd, ".opencode", "skills"), "from-eco", "body", "name: from-eco\ndescription: oc");
     const skills = await discoverSkills(cwd, { includeCompatDirs: true, builtinDir: join(cwd, "_nobuiltin") });
-    expect(skills.find((s) => s.name === "from-oc")?.source).toBe("compat");
+    expect(skills.find((s) => s.name === "from-eco")?.source).toBe("compat");
     rmSync(cwd, { recursive: true, force: true });
   });
 });
@@ -108,6 +108,17 @@ describe("parseSkillMd", () => {
   it("treats an unterminated frontmatter as missing", () => {
     const fm = parseSkillMd("---\nname: a\ndescription: b\nno closing fence");
     expect(fm).toEqual({});
+  });
+
+  it("parses description block scalars (| and >)", () => {
+    const pipe = parseSkillMd(
+      ["---", "name: a", "description: |", "  line one", "  line two", "---", "body"].join("\n"),
+    );
+    expect(pipe.description).toBe("line one\nline two");
+    const fold = parseSkillMd(
+      ["---", "name: b", "description: >", "  hello", "  world", "---", "body"].join("\n"),
+    );
+    expect(fold.description).toBe("hello world");
   });
 });
 
@@ -293,7 +304,8 @@ describe("skillsPromptSection", () => {
     expect(out).toMatch(/`commit`/);
     expect(out).toMatch(/Commit the current change/);
     expect(out).toMatch(/when: user says commit/);
-    expect(out).toMatch(/\[tools: bash\]/);
+    // tools: frontmatter is not rendered (advisory-only; not enforced).
+    expect(out).not.toMatch(/\[tools:/);
     expect(out).toMatch(/append/i);
     expect(out).toMatch(/single\s+\*\*best\*\*|single best/i);
     expect(out).toMatch(/no match → do not load/i);

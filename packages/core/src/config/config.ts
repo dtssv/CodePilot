@@ -42,13 +42,17 @@ export const DEFAULT_MODEL_MAX_OUTPUT_TOKENS = 32_000;
 
 /** Per-model context / modality settings stored on a provider preset.
  * `contextWindowMax` is the provider-reported ceiling (often omitted);
- * `contextWindow` is the user-effective budget (≤ max when set). */
+ * `contextWindow` is the user-effective budget (≤ max when set).
+ * Optional `reasoningEffortChoices` overrides id heuristics for the effort UI. */
 export const ModelCapabilitiesSchema = z
   .object({
     contextWindowMax: z.number().int().positive().optional(),
     contextWindow: z.number().int().positive(),
     modalities: z.array(ModelModalitySchema).min(1),
     maxOutputTokens: z.number().int().positive().optional(),
+    reasoningEffortChoices: z
+      .array(z.enum(["off", "low", "medium", "high"]))
+      .optional(),
   })
   .strict()
   .superRefine((val, ctx) => {
@@ -78,9 +82,8 @@ const ProviderPresetSchema = z
     azureApiVersion: z.string().min(1).optional(),
     /** OpenAI API dialect (only used when provider is "openai"). */
     apiStyle: z.enum(["chat", "responses"]).optional(),
-    /** Extra HTTP headers merged into every provider request (e.g. OpenCode /
-     * OpenRouter gateways that require Referer / custom auth). Auth headers
-     * from the provider still win on collision. */
+    /** Extra HTTP headers merged into every provider request (gateways needing
+     * Referer / custom auth). Provider auth headers still win on collision. */
     headers: z.record(z.string(), z.string()).optional(),
  /** Models offered in the picker for this preset. */
     models: z.array(z.string().min(1)).optional(),
@@ -230,6 +233,7 @@ export const McpServerConfigSchema = z.union([
       envPassthrough: z.array(z.string().min(1)).optional(),
       sandbox: z.union([z.boolean(), z.object({ writablePaths: z.array(z.string().min(1)).optional() }).strict()]).optional(),
       disabled: z.boolean().optional(),
+      timeoutMs: z.number().int().min(1_000).max(3_600_000).optional(),
     })
     .strict(),
  // Streamable HTTP (2025-03-26) and SSE transports
@@ -244,6 +248,7 @@ export const McpServerConfigSchema = z.union([
       oauthClientSecret: z.string().min(1).optional(),
       oauthScopes: z.array(z.string().min(1)).optional(),
       disabled: z.boolean().optional(),
+      timeoutMs: z.number().int().min(1_000).max(3_600_000).optional(),
     })
     .strict(),
 ]);
@@ -333,6 +338,7 @@ export const WebFetchConfigSchema = z
     allowedDomains: z.array(z.string().min(1)).optional(),
     blockedDomains: z.array(z.string().min(1)).optional(),
     cacheTtlMinutes: z.number().int().min(0).optional(),
+    allowLocal: z.boolean().optional(),
   })
   .strict();
 
@@ -405,20 +411,25 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // Overrides the budget derived from reasoningEffort.
     thinkingBudget: z.number().int().nonnegative().max(200_000).optional(),
     contextWindow: z.number().int().positive().optional(),
-    // Soft mid-history fold target. Opt-in — omit to keep append-only sends
-    // (prompt-cache friendly); when set, capped by contextWindow at runtime.
+    // Soft mid-history size-fold target. Opt-in — omit skips escalating
+    // keep/minChars folds (cache-hostile); when set, capped by contextWindow.
     maxContextTokens: z.number().int().positive().optional(),
-    // Rolling tool-output window (count-based). Opt-in — omit disables;
-    // 0 folds all old results. Mid-history rewrite breaks prompt cache.
+    // Rolling tool-output window (count-based). Opt-in — omit uses stable
+    // size-fold instead; 0 folds all old results. Tight caps hurt cache hits.
     maxToolResultsInContext: z.number().int().min(0).max(1000).optional(),
+    // Durable prune: overlay stubs onto old large tool_results (default on).
+    // Default off (unset): mid-run micro-fold rewrites bust prompt cache.
+    toolResultPrune: z.boolean().optional(),
+    toolResultPruneMinChars: z.number().int().min(200).max(100_000).optional(),
+    toolResultPruneTriggerChars: z.number().int().min(0).max(2_000_000).optional(),
     compactionThreshold: z.number().positive().min(0.1).max(1).optional(),
     autoCompact: z.boolean().optional(),
     // Consecutive failed/ineffective auto-compactions before the circuit
     // breaker disables auto-compaction for the session (default 3). A manual
     // /compact that gets back under budget re-enables it.
     autoCompactMaxConsecutiveFailures: z.number().int().min(1).max(100).optional(),
-    // Files re-attached (current disk content) after a summary compaction drops
-    // the turns that read them (default 5; 0 disables).
+    // Paths listed (not body-inlined) after a summary compaction drops the
+    // turns that read them (default 5; 0 disables the list).
     compactRestoreFiles: z.number().int().min(0).max(20).optional(),
     // Snapshot the whole workspace (shadow git repo) around each turn so /undo
     // also reverts files changed by bash/MCP (git workspaces only; default true).
@@ -512,6 +523,10 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
       .optional(),
     mcpToolDiscovery: z.enum(["auto", "lazy", "eager"]).optional(),
     mcpLazyThreshold: z.number().int().min(1).max(1000).optional(),
+    // Wall-clock ceiling (ms) for a single MCP tool/resource/prompt call. Default 60s.
+    mcpToolTimeoutMs: z.number().int().min(1_000).max(3_600_000).optional(),
+    // Wall-clock for initialize + list discovery. Default 120s (npx cold start).
+    mcpStartupTimeoutMs: z.number().int().min(1_000).max(3_600_000).optional(),
     // Allowlist of MCP server names that may start. Empty/omitted = no
     // restriction; non-empty refuses unlisted servers. Enterprise lock-down.
     mcpAllowedServers: z.array(z.string().min(1)).optional(),
@@ -562,9 +577,8 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
     // before reading. Default 64 MiB. Line windows don't bypass it — a window
     // still reads the whole file, so the gate is on total size.
     maxReadBytes: z.number().int().min(4096).optional(),
-    // `grep` search backend. "walker" (default, dependency-free), "rg" (always
-    // shell out to ripgrep, fall back to walker), or "auto" (walker, but try
-    // ripgrep first on PATH). No native dependency is bundled.
+    // `grep` search backend. "rg" (default) / "auto": packaged `@vscode/ripgrep`
+    // or PATH `rg`, walker fallback. "walker": JS walker only.
     grep: z
       .object({ backend: z.enum(["walker", "rg", "auto"]).optional() })
       .strict()
@@ -654,6 +668,9 @@ export const CodepilotConfigSchema: z.ZodType<unknown> = z
         // When false, do not register the `code_mode` tool (default true).
         enabled: z.boolean().optional(),
         runtime: z.enum(["vm", "subprocess"]).optional(),
+        // When true (default while enabled), shrink provider tools[] to the
+        // direct allowlist; deferred tools go through code_mode.tools.*.
+        deferredWire: z.boolean().optional(),
       })
       .strict()
       .optional(),
@@ -1356,7 +1373,7 @@ export function useProvider(
   // apiStyle is likewise a runtime provider field (OpenAI chat vs responses
   // dialect); flatten it so switching to a responses-style preset takes effect.
   if (preset.apiStyle !== undefined) out.apiStyle = preset.apiStyle;
-  // Custom request headers (OpenCode / OpenRouter / private gateways).
+  // Custom request headers (private gateways / proxies).
   if (preset.headers !== undefined) out.headers = preset.headers;
   else delete out.headers;
   if (preset.smallModel !== undefined) {

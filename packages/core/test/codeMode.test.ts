@@ -41,6 +41,8 @@ describe("code_mode", () => {
     expect(d).toMatch(/no per-call permission prompts/);
     expect(d).toMatch(/OS sandbox\/path guard still apply/);
     expect(d).toMatch(/agent mode only/);
+    expect(d).toMatch(/tools\.search/);
+    expect(d).toMatch(/tools\.call/);
     // JavaScript only (no transpile) — not "TypeScript".
     expect(d).toMatch(/JavaScript/);
     expect(d).not.toMatch(/TypeScript\/JavaScript/);

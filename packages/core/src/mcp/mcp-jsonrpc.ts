@@ -22,7 +22,8 @@ import { sanitizeUntrustedMcpText } from "./mcpResultSanitize.js";
 
 export interface JsonRpcRequest {
   jsonrpc: "2.0";
-  id: number | string;
+  /** Present for requests; omitted for notifications (JSON-RPC 2.0). */
+  id?: number | string;
   method: string;
   params?: unknown;
 }
@@ -70,16 +71,36 @@ function pickBoolHints(a: {
  * dispatches responses. The transport is responsible for delivering raw
  * JSON-RPC envelopes to `onMessage` and for shipping outbound messages
  * through `sendFrame`. */
+/** Default wall-clock ceiling for a single MCP tool/resource/prompt call. */
+export const DEFAULT_MCP_REQUEST_TIMEOUT_MS = 60_000;
+/** Default wall-clock ceiling for initialize + list discovery. */
+export const DEFAULT_MCP_STARTUP_TIMEOUT_MS = 120_000;
+/** Max pages when following `nextCursor` on tools/resources/prompts list. */
+const MCP_LIST_MAX_PAGES = 50;
+/** Soft cap on total listed items across pages (safety against runaway servers). */
+const MCP_LIST_MAX_ITEMS = 10_000;
+
 export abstract class BaseJsonRpcClient implements McpClient {
   abstract readonly serverName: string;
   protected nextId = 1;
   protected readonly pending = new Map<number | string, Pending>();
   protected serverInfo: { name: string; version?: string } | null = null;
+  /** Server-provided usage instructions from `initialize` (sanitized). */
+  protected instructions: string | null = null;
   protected tools: McpToolDescriptor[] = [];
   protected resources: McpResourceDescriptor[] = [];
   protected prompts: McpPromptDescriptor[] = [];
   protected supportsResources = false;
   protected supportsPrompts = false;
+  /** Per-call (tool/resource/prompt) wall-clock timeout (ms). */
+  protected requestTimeoutMs = DEFAULT_MCP_REQUEST_TIMEOUT_MS;
+  /** Handshake + list discovery wall-clock timeout (ms). */
+  protected startupTimeoutMs = DEFAULT_MCP_STARTUP_TIMEOUT_MS;
+  /**
+   * When true, advertise sampling/elicitation in `initialize`. Set before
+   * `start()` when the host can handle reverse requests.
+   */
+  protected clientReverseRequests = false;
  /** Optional reverse-request handler (elicitation/sampling). */
   protected serverRequestHandler: McpServerRequestHandler | null = null;
  /** Optional notification: the server's tool list changed. Fired AFTER the
@@ -176,19 +197,60 @@ export abstract class BaseJsonRpcClient implements McpClient {
     return this.request("prompts/get", { name, arguments: args ?? {} });
   }
 
+ /** Override the per-call (tool/resource/prompt) wall-clock timeout (ms). */
+  setRequestTimeoutMs(ms: number): void {
+    this.requestTimeoutMs = Math.max(1_000, Math.floor(ms));
+  }
+
+ /** Override the handshake/list discovery wall-clock timeout (ms). */
+  setStartupTimeoutMs(ms: number): void {
+    this.startupTimeoutMs = Math.max(1_000, Math.floor(ms));
+  }
+
+ /** Advertise sampling/elicitation only when the host can handle reverse requests. */
+  setClientReverseRequests(enabled: boolean): void {
+    this.clientReverseRequests = enabled;
+  }
+
+ /** Sanitized server instructions from initialize, if any. */
+  getInstructions(): string | null {
+    return this.instructions;
+  }
+
  /** Issue a JSON-RPC request and resolve with the `result` field. */
-  protected async request(method: string, params: unknown): Promise<unknown> {
+  protected async request(
+    method: string,
+    params: unknown,
+    opts?: { timeoutMs?: number },
+  ): Promise<unknown> {
     // Transports may transparently re-establish a dropped connection here
     // (default: no-op). This makes a request after a server crash reconnect
     // instead of failing permanently with "not running".
     await this.ensureConnected();
     const id = this.nextId++;
     const msg: JsonRpcRequest = { jsonrpc: "2.0", id, method, params };
+    const timeoutMs = opts?.timeoutMs ?? this.requestTimeoutMs;
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (!this.pending.has(id)) return;
+        this.pending.delete(id);
+        reject(new Error(`MCP request timed out after ${timeoutMs}ms (${method})`));
+      }, timeoutMs);
+      timer.unref?.();
+      this.pending.set(id, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
       try {
         this.sendFrame(msg);
       } catch (err) {
+        clearTimeout(timer);
         this.pending.delete(id);
         reject(err as Error);
       }
@@ -206,10 +268,9 @@ export abstract class BaseJsonRpcClient implements McpClient {
   protected notify(method: string, params: unknown): void {
     this.sendFrame({
       jsonrpc: "2.0",
-      id: this.nextId++,
       method,
       params,
-    } as unknown as JsonRpcRequest);
+    });
   }
 
  /** Dispatch a single parsed JSON-RPC envelope. Subclasses call this from
@@ -290,10 +351,13 @@ export abstract class BaseJsonRpcClient implements McpClient {
       return;
     }
     if (method === "notifications/resources/list_changed" && this.supportsResources) {
+      // Refresh cache only — resources are exposed via mcp meta / @mcp:, not
+      // per-resource FC tools, so no tool re-registration is needed.
       void this.refreshResources().catch(() => undefined);
       return;
     }
     if (method === "notifications/prompts/list_changed" && this.supportsPrompts) {
+      // Refresh cache only — prompts are slash + mcp meta, not FC tools.
       void this.refreshPrompts().catch(() => undefined);
       return;
     }
@@ -304,73 +368,97 @@ export abstract class BaseJsonRpcClient implements McpClient {
  /** Run the standard `initialize` handshake + capability probe. Subclasses
  * call this once the transport is up. */
   protected async handshakeAndDiscover(): Promise<void> {
-    const init = (await this.request("initialize", {
-      protocolVersion: "2024-11-05",
-      capabilities: {
-        elicitation: {},
-        sampling: {},
+    const startup = { timeoutMs: this.startupTimeoutMs };
+    const caps: Record<string, unknown> = {};
+    if (this.clientReverseRequests) {
+      caps.elicitation = {};
+      caps.sampling = {};
+    }
+    const init = (await this.request(
+      "initialize",
+      {
+        protocolVersion: "2024-11-05",
+        capabilities: caps,
+        clientInfo: { name: "codepilot", version: "2.0.0" },
       },
-      clientInfo: { name: "codepilot", version: "2.0.0" },
-    })) as {
+      startup,
+    )) as {
       serverInfo?: { name: string; version?: string };
       capabilities?: { resources?: unknown; prompts?: unknown };
+      instructions?: unknown;
     };
     if (init.serverInfo) this.serverInfo = init.serverInfo;
     this.supportsResources = Boolean(init.capabilities?.resources);
     this.supportsPrompts = Boolean(init.capabilities?.prompts);
+    if (typeof init.instructions === "string" && init.instructions.trim()) {
+      this.instructions = sanitizeUntrustedMcpText(init.instructions.trim());
+    } else {
+      this.instructions = null;
+    }
 
- // notifications/initialized has no `id` and no response.
-    this.sendFrame({
-      jsonrpc: "2.0",
-      id: this.nextId++,
-      method: "notifications/initialized",
-      params: {},
-    } as unknown as JsonRpcRequest);
+    // notifications/initialized: notification → no id, no response.
+    this.notify("notifications/initialized", {});
 
     await this.refreshTools();
     if (this.supportsResources) await this.refreshResources().catch(() => undefined);
     if (this.supportsPrompts) await this.refreshPrompts().catch(() => undefined);
   }
 
-  private async refreshTools(): Promise<void> {
-    const res = (await this.request("tools/list", {})) as {
-      tools?: Array<{
-        name: string;
-        description?: string;
-        inputSchema?: Record<string, unknown>;
-        annotations?: {
-          readOnlyHint?: unknown;
-          destructiveHint?: unknown;
-          idempotentHint?: unknown;
-          openWorldHint?: unknown;
-        };
-      }>;
-    };
-    if (!res.tools) {
-      this.tools = [];
-      return;
+  /** Follow `nextCursor` pages until exhausted or safety caps hit. */
+  private async listAllPages<T>(
+    method: string,
+    key: string,
+  ): Promise<T[]> {
+    const startup = { timeoutMs: this.startupTimeoutMs };
+    const out: T[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < MCP_LIST_MAX_PAGES; page++) {
+      const params: Record<string, unknown> = {};
+      if (cursor !== undefined) params.cursor = cursor;
+      const res = (await this.request(method, params, startup)) as Record<string, unknown>;
+      const batch = Array.isArray(res[key]) ? (res[key] as T[]) : [];
+      for (const item of batch) {
+        out.push(item);
+        if (out.length >= MCP_LIST_MAX_ITEMS) return out;
+      }
+      const next = res.nextCursor;
+      if (typeof next !== "string" || next.length === 0) break;
+      cursor = next;
     }
-    this.tools = res.tools.map((t) => ({
+    return out;
+  }
+
+  private async refreshTools(): Promise<void> {
+    type RawTool = {
+      name: string;
+      description?: string;
+      inputSchema?: Record<string, unknown>;
+      annotations?: {
+        readOnlyHint?: unknown;
+        destructiveHint?: unknown;
+        idempotentHint?: unknown;
+        openWorldHint?: unknown;
+      };
+    };
+    const raw = await this.listAllPages<RawTool>("tools/list", "tools");
+    this.tools = raw.map((t) => ({
       server: this.serverName,
       name: t.name,
       description: t.description ?? "",
       inputSchema: t.inputSchema ?? { type: "object", properties: {} },
-      // Only keep hints that are explicitly boolean true — treat any other
-      // shape (missing, null, string) as "unknown", never as a privilege grant.
       annotations: pickBoolHints(t.annotations),
     }));
   }
 
   private async refreshResources(): Promise<void> {
-    const res = (await this.request("resources/list", {})) as {
-      resources?: Array<{
-        uri: string;
-        name: string;
-        description?: string;
-        mimeType?: string;
-      }>;
+    type RawRes = {
+      uri: string;
+      name: string;
+      description?: string;
+      mimeType?: string;
     };
-    this.resources = (res.resources ?? []).map((r) => ({
+    const raw = await this.listAllPages<RawRes>("resources/list", "resources");
+    this.resources = raw.map((r) => ({
       server: this.serverName,
       uri: r.uri,
       name: r.name,
@@ -380,14 +468,13 @@ export abstract class BaseJsonRpcClient implements McpClient {
   }
 
   private async refreshPrompts(): Promise<void> {
-    const res = (await this.request("prompts/list", {})) as {
-      prompts?: Array<{
-        name: string;
-        description?: string;
-        arguments?: Array<{ name: string; description?: string; required?: boolean }>;
-      }>;
+    type RawPrompt = {
+      name: string;
+      description?: string;
+      arguments?: Array<{ name: string; description?: string; required?: boolean }>;
     };
-    this.prompts = (res.prompts ?? []).map((p) => ({
+    const raw = await this.listAllPages<RawPrompt>("prompts/list", "prompts");
+    this.prompts = raw.map((p) => ({
       server: this.serverName,
       name: p.name,
       description: p.description,

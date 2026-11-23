@@ -152,12 +152,12 @@ describe("buildSystemPrompt static prefix", () => {
     expect(taskTool.description).toMatch(/fork_max_tokens/);
   });
 
-  it("gates long-horizon goal guidance on start_goal", async () => {
+  it("gates long-horizon goal guidance on goal", async () => {
     const bare = await buildSystemPrompt(baseCtx);
     expect(bare.staticPrefix).not.toContain("Long-horizon goals");
     const withGoal = await buildSystemPrompt({
       ...baseCtx,
-      toolNames: ["start_goal", "plan_update"],
+      toolNames: ["goal", "plan"],
     });
     expect(withGoal.staticPrefix).toContain("Long-horizon goals");
     expect(withGoal.staticPrefix).toMatch(/Ordinary refactors/);
@@ -189,8 +189,8 @@ describe("buildSystemPrompt static prefix", () => {
     expect(readOnly.staticPrefix).not.toContain("Code Conventions");
   });
 
-  it("keeps planning principles in the static prefix; field detail on plan_update", async () => {
-    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["plan_update"] });
+  it("keeps planning principles in the static prefix; field detail on plan", async () => {
+    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["plan"] });
     expect(out.staticPrefix).toMatch(/One primary tracker/);
     expect(out.staticPrefix).toMatch(/Plan when ≥3 mutate\/verify\/decision/);
     expect(out.staticPrefix).toMatch(/do \*\*not\*\* count/);
@@ -199,9 +199,9 @@ describe("buildSystemPrompt static prefix", () => {
     expect(out.staticPrefix).not.toMatch(/teach by contrast/);
     expect(out.staticPrefix).not.toMatch(/research\/study/);
     expect(out.staticPrefix).not.toMatch(/easiest ~25%/);
-    const { planUpdateTool } = await import("../src/tools/plan_update.js");
-    expect(planUpdateTool.description).toMatch(/non-file outcome/);
-    expect(planUpdateTool.description).toMatch(/start_goal/);
+    const { planTool } = await import("../src/tools/plan.js");
+    expect(planTool.description).toMatch(/non-file outcome/);
+    expect(planTool.description).toMatch(/`goal`/);
   });
 
   it("gates testing guidance on mutating tools", async () => {
@@ -258,7 +258,7 @@ describe("buildSystemPrompt static prefix", () => {
     // Expose the tools: the matching sections appear.
     const full = await buildSystemPrompt({
       ...baseCtx,
-      toolNames: ["plan_update", "memory_write", "mcp__github__search"],
+      toolNames: ["plan", "memory_write", "mcp__github__search"],
     });
     expect(full.staticPrefix).toContain("Planning and Task State");
     expect(full.staticPrefix).toContain("# Memory");
@@ -391,10 +391,10 @@ describe("buildSystemPrompt mode paragraphs", () => {
     const out = await buildSystemPrompt({
       ...baseCtx,
       mode: "plan",
-      toolNames: ["read_file", "plan_update"],
+      toolNames: ["read_file", "plan"],
     });
     expect(out.volatileSuffix).toMatch(/Mode: `plan`/);
-    expect(out.volatileSuffix).toMatch(/`plan_update`/);
+    expect(out.volatileSuffix).toMatch(/`plan`/);
     expect(out.volatileSuffix).toMatch(/read-only exploration/);
   });
 
@@ -487,7 +487,7 @@ describe("buildSystemPrompt dynamic suffix", () => {
     // commit and would bust the prompt cache); agents fetch tip on demand.
     expect(out.dynamicSuffix).not.toContain("last_commit:");
     expect(out.dynamicSuffix).toContain("</git>");
-    // Dirty working-tree is not injected (peer parity); only identity lives in <git>.
+    // Dirty working-tree is not injected; only identity lives in <git>.
     expect(out.volatileSuffix).not.toContain("working_tree:");
     expect(out.dynamicSuffix).not.toContain("working_tree:");
   });
@@ -816,7 +816,7 @@ describe("buildSystemPrompt C4 contracts", () => {
   });
 
   it("decidable conditions: planning uses ≥3-steps, not the vague 'non-trivial task'", async () => {
-    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "plan_update"] });
+    const out = await buildSystemPrompt({ ...baseCtx, toolNames: ["read_file", "plan"] });
     expect(out.staticPrefix).toContain("≥3 mutate/verify/decision steps");
     // The planning rule no longer hinges on the undecidable "non-trivial".
     const planStart = out.staticPrefix.indexOf("## Planning and Task State");

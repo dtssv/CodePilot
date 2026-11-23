@@ -18,6 +18,8 @@ export interface MessageRow {
  /** Non-image uploads written under `~/.codepilot/projects/<hash>/uploads/`. */
   files?: SavedUpload[];
   model?: string;
+ /** Mid-run inject (steering). Render as an inline chip, not a new bubble. */
+  steer?: boolean;
  /** True until the terminal `message` event lands. */
   streaming: boolean;
  /** Wall-clock of first streamed token (assistant only) — for TTFT. */

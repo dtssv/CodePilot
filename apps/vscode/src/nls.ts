@@ -6,6 +6,8 @@ const ZH: Record<string, string> = {
   "CodePilot: open a file and place the cursor where the code should go.":
     "CodePilot：请先打开文件，并把光标放到要插入代码的位置。",
   "CodePilot: select some code first.": "CodePilot：请先选中一段代码。",
+  "CodePilot: pick a file first.": "CodePilot：请先选择一个文件。",
+  "CodePilot: pick a file or select some code first.": "CodePilot：请先选择文件或选中一段代码。",
   "CodePilot: open a file first.": "CodePilot：请先打开一个文件。",
   "CodePilot: open a folder in the window, or it will use ~/CodePilot.":
     "CodePilot：请在窗口中打开文件夹；否则将使用 ~/CodePilot。",

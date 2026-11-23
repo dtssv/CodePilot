@@ -22,6 +22,10 @@ import {
 export class McpHttpClient extends BaseJsonRpcClient {
   private sessionId: string | null = null;
   private stopped = false;
+  private everStarted = false;
+  private reconnecting: Promise<void> | null = null;
+  /** Cleared on transport failure so ensureConnected can re-handshake. */
+  private connected = false;
   private readonly baseUrl: URL;
   private readonly headers: Record<string, string>;
   private readonly oauth: OAuthTransportHelper | null;
@@ -51,13 +55,9 @@ export class McpHttpClient extends BaseJsonRpcClient {
         : null;
   }
 
-  async start(): Promise<void> {
-    if (this.stopped) throw new Error(`MCP ${this.serverName} already stopped`);
-    await this.handshakeAndDiscover();
-  }
-
   async stop(): Promise<void> {
     this.stopped = true;
+    this.connected = false;
     this.failAllPending(new Error(`MCP ${this.serverName} stopped`));
     if (this.sessionId) {
  // Best-effort session termination.
@@ -69,12 +69,36 @@ export class McpHttpClient extends BaseJsonRpcClient {
   protected sendFrame(msg: JsonRpcRequest): void {
     if (this.stopped) throw new Error(`MCP ${this.serverName} is stopped`);
     this.postJson(msg).catch((err) => {
-      const p = this.pending.get(msg.id);
-      if (p) {
-        this.pending.delete(msg.id);
-        p.reject(err instanceof Error ? err : new Error(String(err)));
+      this.connected = false;
+      if (msg.id !== undefined && msg.id !== null) {
+        const p = this.pending.get(msg.id);
+        if (p) {
+          this.pending.delete(msg.id);
+          p.reject(err instanceof Error ? err : new Error(String(err)));
+        }
       }
     });
+  }
+
+  async start(): Promise<void> {
+    if (this.stopped) throw new Error(`MCP ${this.serverName} already stopped`);
+    await this.handshakeAndDiscover();
+    this.everStarted = true;
+    this.connected = true;
+  }
+
+  protected override async ensureConnected(): Promise<void> {
+    if (this.stopped || this.connected || !this.everStarted) return;
+    if (this.reconnecting) return this.reconnecting;
+    this.reconnecting = (async () => {
+      process.stderr.write(`[mcp:${this.serverName}] connection lost — reconnecting\n`);
+      this.sessionId = null;
+      await this.handshakeAndDiscover();
+      this.connected = true;
+    })().finally(() => {
+      this.reconnecting = null;
+    });
+    return this.reconnecting;
   }
 
   private async rawRequest(method: "DELETE"): Promise<void> {
@@ -134,12 +158,17 @@ export class McpHttpClient extends BaseJsonRpcClient {
  // success; on failure the pending entry was rejected there. Nothing
  // more to do here.
     })().catch((err) => {
-      const p = this.pending.get(msg.id);
-      if (p) {
-        this.pending.delete(msg.id);
-        p.reject(err instanceof Error ? err : new Error(String(err)));
-      }
+      this.rejectPending(msg.id, err instanceof Error ? err : new Error(String(err)));
     });
+  }
+
+  private rejectPending(id: string | number | undefined, err: Error): void {
+    if (id === undefined || id === null) return;
+    const p = this.pending.get(id);
+    if (p) {
+      this.pending.delete(id);
+      p.reject(err);
+    }
   }
 
  /** Perform a single POST. Returns the raw response on HTTP-level failure
@@ -195,14 +224,10 @@ export class McpHttpClient extends BaseJsonRpcClient {
       if (res.status === 401 && this.oauth) {
         return res;
       }
-      const p = this.pending.get(msg.id);
-      const err = new Error(
-        `MCP ${this.serverName} HTTP ${res.status}: ${text.slice(0, 300)}`,
+      this.rejectPending(
+        msg.id,
+        new Error(`MCP ${this.serverName} HTTP ${res.status}: ${text.slice(0, 300)}`),
       );
-      if (p) {
-        this.pending.delete(msg.id);
-        p.reject(err);
-      }
       return res;
     }
     if (isNotification || res.status === 202) {
@@ -214,11 +239,7 @@ export class McpHttpClient extends BaseJsonRpcClient {
       try {
         this.onMessage(JSON.parse(text) as JsonRpcResponse);
       } catch {
-        const p = this.pending.get(msg.id);
-        if (p) {
-          this.pending.delete(msg.id);
-          p.reject(new Error(`MCP ${this.serverName}: non-JSON response`));
-        }
+        this.rejectPending(msg.id, new Error(`MCP ${this.serverName}: non-JSON response`));
       }
     }
     return null;

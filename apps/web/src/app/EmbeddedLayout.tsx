@@ -10,6 +10,8 @@ import {
   SessionList,
   useStickyScroll,
 } from "../components/Chrome.js";
+import { FeatureDialogHost, isFeatureSection } from "../components/FeatureDialog.js";
+import { FeatureOverflowMenu } from "../components/FeatureMenu.js";
 import { SettingsPanel } from "../components/SettingsPanel.js";
 import {
   AlertIcon,
@@ -32,7 +34,11 @@ export function EmbeddedLayout({
   draft,
   setDraft,
   theme,
+  themePreference,
   setThemePersist,
+  setLocalePersist,
+  panelPosition,
+  setPanelPosition,
   themeName,
   setThemeNamePersist,
   layout,
@@ -68,22 +74,54 @@ export function EmbeddedLayout({
   const hostView =
     typeof window !== "undefined" ? window.__codepilotHost?.view : undefined;
 
-  const openSettings = useCallback((): void => {
-    // VS Code/Cursor: sidebar cannot set an exact width — ask the host to open
-    // a wide editor Settings panel. IDEA / settings-view: open the in-webview sheet.
-    if (bridge && bridge.kind === "vscode" && hostView !== "settings") {
-      bridge.post({ type: "openSettings" });
-      return;
-    }
-    if (bridge && bridge.kind === "idea") bridge.post({ type: "openSettings" });
-    setShowSettings(true);
-  }, [bridge, hostView]);
+  const openSettings = useCallback(
+    (section?: string): void => {
+      // Skills · Connectors / Schedule / Remote open in-webview — not host Settings.
+      if (isFeatureSection(section)) {
+        window.dispatchEvent(
+          new CustomEvent("codepilot:open-feature", { detail: { section } }),
+        );
+        return;
+      }
+      // VS Code/Cursor and IDEA both give Settings its own editor surface, which
+      // a narrow chat sidebar cannot do. Hand off to the host and stop — the
+      // in-panel sheet stays for the standalone web/desktop surface only.
+      if (hostView !== "settings") {
+        if (bridge && bridge.kind === "vscode") {
+          bridge.post({ type: "openSettings", section });
+          return;
+        }
+        if (bridge && bridge.kind === "idea") {
+          bridge.post({ type: "openSettings", section });
+          return;
+        }
+      }
+      setShowSettings(true);
+      if (section) {
+        requestAnimationFrame(() =>
+          window.dispatchEvent(new CustomEvent("codepilot:settings-nav", { detail: { section } })),
+        );
+      }
+    },
+    [bridge, hostView],
+  );
 
   useEffect(() => {
-    const open = (): void => setShowSettings(true);
+    const open = (ev: Event): void => {
+      const section = (ev as CustomEvent<{ section?: string }>).detail?.section;
+      openSettings(section);
+    };
+    const showSheet = (): void => setShowSettings(true);
+    const openHistory = (): void => setShowHistory(true);
     window.addEventListener("codepilot:open-settings", open);
-    return () => window.removeEventListener("codepilot:open-settings", open);
-  }, []);
+    window.addEventListener("codepilot:show-settings-sheet", showSheet);
+    window.addEventListener("codepilot:open-history", openHistory);
+    return () => {
+      window.removeEventListener("codepilot:open-settings", open);
+      window.removeEventListener("codepilot:show-settings-sheet", showSheet);
+      window.removeEventListener("codepilot:open-history", openHistory);
+    };
+  }, [openSettings]);
 
   useEffect(() => {
     if (hostView === "settings") setShowSettings(true);
@@ -122,10 +160,11 @@ export function EmbeddedLayout({
           </label>
         )}
         <div className="ml-auto flex items-center">
+          <FeatureOverflowMenu disabled={!connected} />
           <button
             type="button"
             className="cp-icon-btn"
-            onClick={openSettings}
+            onClick={() => openSettings()}
             disabled={!connected}
             title={t("Settings")}
           >
@@ -252,6 +291,13 @@ export function EmbeddedLayout({
               onRetry={() => void cp.retryLast()}
               onOpenPath={onOpenFile}
               onInsertCode={onInsertCode}
+              onAddToChat={(text) => {
+                const quote = text
+                  .split("\n")
+                  .map((l) => `> ${l}`)
+                  .join("\n");
+                setDraft(draft.trim() ? `${draft.trim()}\n\n${quote}` : quote);
+              }}
             />
           )}
           <EmbeddedFiles cp={cp} onOpenFile={onOpenFile} />
@@ -270,10 +316,13 @@ export function EmbeddedLayout({
           setShowSettings(false);
           bridge?.post({ type: "closeSettings" });
         }}
-        theme={theme}
+        themePreference={themePreference}
         onTheme={setThemePersist}
         themeName={themeName}
         onThemeName={setThemeNamePersist}
+        onLocale={setLocalePersist}
+        panelPosition={panelPosition}
+        onPanelPosition={setPanelPosition}
         layout={layout}
         onLayout={switchLayout}
         onComposePrompt={(text) => {
@@ -281,6 +330,19 @@ export function EmbeddedLayout({
           setShowSettings(false);
           bridge?.post({ type: "closeSettings" });
         }}
+      />
+      <FeatureDialogHost
+        cp={cp}
+        themePreference={themePreference}
+        onTheme={setThemePersist}
+        themeName={themeName}
+        onThemeName={setThemeNamePersist}
+        onLocale={setLocalePersist}
+        panelPosition={panelPosition}
+        onPanelPosition={setPanelPosition}
+        layout={layout}
+        onLayout={switchLayout}
+        onComposePrompt={(text) => setDraft(text)}
       />
     </div>
   );

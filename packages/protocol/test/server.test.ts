@@ -978,13 +978,16 @@ describe("server / protocol handlers", () => {
     >("commands/list", {});
     const names = res.commands.map((c) => c.name);
     // Shared built-ins are advertised; TUI-only ones (exit/remote/connect/setup/
-    // theme/web) are not.
+    // vim/web) are not.
     expect(names).toContain("compact");
     expect(names).toContain("clear");
     expect(names).toContain("model");
+    expect(names).toContain("goal");
+    expect(names).toContain("init");
     expect(names).not.toContain("exit");
     expect(names).not.toContain("remote");
     expect(names).not.toContain("setup");
+    expect(names).not.toContain("vim");
     // Every advertised built-in carries source "builtin" and kind "local" so a
     // GUI client can tell local actions apart from prompt-expanding commands.
     const model = res.commands.find((c) => c.name === "model")!;
@@ -1003,11 +1006,56 @@ describe("server / protocol handlers", () => {
     });
     const res = await client.request<
       { query: string; kinds?: string[]; cwd?: string },
-      { candidates: Array<{ kind: string; value: string; label: string }> }
+      { candidates: Array<{ kind: string; value: string; label: string }>; truncated?: boolean }
     >("workspace/complete", { query: "package", kinds: ["file"], cwd: process.cwd() });
     expect(Array.isArray(res.candidates)).toBe(true);
     // The protocol package has a package.json → should surface as a file candidate.
     expect(res.candidates.some((c) => c.kind === "file" && c.value.includes("package.json"))).toBe(true);
+  });
+
+  it("workspace/complete path-scopes children and reports truncated", async () => {
+    const root = mkdtempSync(join(tmpdir(), "cp-complete-"));
+    try {
+      mkdirSync(join(root, "pkg", "nested"), { recursive: true });
+      writeFileSync(join(root, "pkg", "a.ts"), "a");
+      writeFileSync(join(root, "pkg", "b.ts"), "b");
+      writeFileSync(join(root, "pkg", "c.ts"), "c");
+      writeFileSync(join(root, "top.ts"), "t");
+      registerServer(server, { defaultCwd: root, defaultPermissionMode: "ask" });
+      await client.request("initialize", {
+        protocolVersion: PROTOCOL_VERSION,
+        cwd: root,
+        permissionMode: "ask",
+        clientInfo: { name: "t", version: "0" },
+      });
+      // Empty query → immediate children of cwd (scoped), not a flat dump.
+      const top = await client.request<
+        { query: string; kinds?: string[]; maxResults?: number; cwd?: string },
+        { candidates: Array<{ kind: string; value: string }>; truncated?: boolean }
+      >("workspace/complete", { query: "", kinds: ["file"], cwd: root, maxResults: 40 });
+      expect(top.candidates.some((c) => c.value === "top.ts" || c.value.endsWith("top.ts"))).toBe(true);
+      expect(top.candidates.some((c) => c.kind === "dir" && c.value.replace(/\\/g, "/").startsWith("pkg"))).toBe(
+        true,
+      );
+      // Prefix `pkg/` → only that directory's children.
+      const scoped = await client.request<
+        { query: string; kinds?: string[]; maxResults?: number; cwd?: string },
+        { candidates: Array<{ kind: string; value: string }>; truncated?: boolean }
+      >("workspace/complete", { query: "pkg/", kinds: ["file"], cwd: root, maxResults: 40 });
+      const vals = scoped.candidates.map((c) => c.value.replace(/\\/g, "/"));
+      expect(vals.some((v) => v === "pkg/a.ts" || v.endsWith("pkg/a.ts"))).toBe(true);
+      expect(vals.every((v) => v.startsWith("pkg/") || v.includes("/pkg/"))).toBe(true);
+      expect(vals.some((v) => v.includes("top.ts"))).toBe(false);
+      // Tiny cap → truncated flag.
+      const capped = await client.request<
+        { query: string; kinds?: string[]; maxResults?: number; cwd?: string },
+        { candidates: Array<{ kind: string; value: string }>; truncated?: boolean }
+      >("workspace/complete", { query: "pkg/", kinds: ["file"], cwd: root, maxResults: 2 });
+      expect(capped.candidates.length).toBeLessThanOrEqual(2);
+      expect(capped.truncated).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("session/compact and session/clear-context are handled (local actions)", async () => {

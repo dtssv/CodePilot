@@ -19,9 +19,19 @@ import {
 import { CompletionProvider } from "./completion.js";
 import { Engine, tapServerLine } from "./engine.js";
 import { nls } from "./nls.js";
+import {
+  applyPanelPositionContext,
+  CHAT_VIEW,
+  DOCK_VIEW,
+  isPanelPosition,
+  readPanelPosition,
+  setPanelPosition,
+  focusChatView,
+} from "./panelPosition.js";
 import { ChatViewProvider } from "./sidebar.js";
 import { SettingsView } from "./settingsView.js";
 import { AGENT_MODES, type AgentMode, type Event } from "./types.js";
+import { loadUiPrefs, type UiPrefs } from "./uiPrefs.js";
 import { notifyExtensionUpdateIfAvailable, runCheckUpdatesCommand } from "./updates.js";
 
 const OUTPUT = vscode.window.createOutputChannel("CodePilot");
@@ -59,6 +69,9 @@ function resolveWorkspaceCwd(context: vscode.ExtensionContext): string {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  // Must precede view registration so `when` clauses see left/right/top/bottom.
+  await applyPanelPositionContext(readPanelPosition());
+
   const settings = new SettingsStore();
   const statusBar = new StatusBar("codepilot.openSidebar");
   const cwd = (): string => resolveWorkspaceCwd(context);
@@ -98,6 +111,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     collectDiagnostics(params as { path?: string }, cwd()),
   );
 
+  const broadcastUiPrefs = (prefs: UiPrefs): void => {
+    view?.applyUiPrefs(prefs);
+    settingsView?.applyUiPrefs(prefs);
+  };
+
+  const handleUiPrefs = (prefs: UiPrefs): void => {
+    if (isPanelPosition(prefs.panelPosition)) {
+      void setPanelPosition(prefs.panelPosition, { focus: true }).then((pos) => {
+        // Remounted chat webviews must receive the full SoT (locale/theme), not
+        // only the dock field — otherwise language falls back to IDE chrome.
+        broadcastUiPrefs({ ...loadUiPrefs(context), ...prefs, panelPosition: pos });
+      });
+      return;
+    }
+    broadcastUiPrefs(prefs);
+  };
+
   view = new ChatViewProvider(context, {
     engine,
     cwd,
@@ -108,6 +138,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       void context.workspaceState.update(ACTIVE_CWD_KEY, next);
     },
     onOpenWideSettings: () => settingsView?.show(),
+    onUiPrefs: handleUiPrefs,
     log: (line) => OUTPUT.appendLine(line),
     onEngineError: (message) => {
       OUTPUT.appendLine(`[engine] ${message}`);
@@ -129,14 +160,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     engine,
     cwd,
     folders,
+    onUiPrefs: handleUiPrefs,
     log: (line) => OUTPUT.appendLine(line),
   });
 
   registerConfigSync(context);
 
+  const webviewOpts = { webviewOptions: { retainContextWhenHidden: true } };
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("codepilot.chatView", view, {
-      webviewOptions: { retainContextWhenHidden: true },
+    vscode.window.registerWebviewViewProvider(CHAT_VIEW.left, view, webviewOpts),
+    vscode.window.registerWebviewViewProvider(CHAT_VIEW.right, view, webviewOpts),
+    vscode.window.registerWebviewViewProvider(CHAT_VIEW.panel, view, webviewOpts),
+    // Empty anchor view: keeps the primary container non-empty (VS Code hides a
+    // container with no visible view) and renders its `viewsWelcome` links.
+    vscode.window.registerTreeDataProvider(DOCK_VIEW, {
+      getChildren: () => [],
+      getTreeItem: () => {
+        throw new Error("codepilot.dock has no items");
+      },
     }),
     settings,
     statusBar,
@@ -151,7 +192,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }
       view?.notifyWorkspace(active, folders());
     }),
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (!e.affectsConfiguration("codepilot.panelPosition")) return;
+      const pos = readPanelPosition();
+      void applyPanelPositionContext(pos).then(() => {
+        broadcastUiPrefs({ ...loadUiPrefs(context), panelPosition: pos });
+        void focusChatView(pos);
+      });
+    }),
     vscode.commands.registerCommand("codepilot.openSidebar", focusView),
+    vscode.commands.registerCommand("codepilot.dockHere", () => void setPanelPosition("left")),
     // Wide editor Settings panel (sidebar cannot set an exact width).
     vscode.commands.registerCommand("codepilot.openSettings", () => settingsView?.show()),
     // Optional: VS Code extension-host prefs (cli path, …); synced scalars → ~/.codepilot.
@@ -208,8 +258,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       statusBar.setMode(mode);
       view?.command({ name: "mode", mode });
     }),
-    vscode.commands.registerCommand("codepilot.addToChat", () => addSelection(false)),
-    vscode.commands.registerCommand("codepilot.addToNewChat", () => addSelection(true)),
+    vscode.commands.registerCommand("codepilot.addToChat", (uri?: vscode.Uri) =>
+      addToChat(uri, false),
+    ),
+    vscode.commands.registerCommand("codepilot.addToNewChat", (uri?: vscode.Uri) =>
+      addToChat(uri, true),
+    ),
     vscode.commands.registerCommand("codepilot.askSelection", askSelection),
     vscode.commands.registerCommand("codepilot.explainFile", () =>
       promptOnActiveFile("Explain this file in a structured way (overview, key components, gotchas)."),
@@ -250,40 +304,65 @@ export function deactivate(): void {
 }
 
 async function focusView(): Promise<void> {
-  await vscode.commands.executeCommand("workbench.view.extension.codepilot");
-  await vscode.commands.executeCommand("codepilot.chatView.focus");
+  await focusChatView(readPanelPosition());
 }
 
 /* ---------------- editor → prompt ---------------- */
 
-/** "Add to Chat" / "Add to New Chat": drop the selected code into the composer
- * as a reference WITHOUT sending, so the user writes their own prompt around
- * it. `newChat` opens a fresh session first. */
-async function addSelection(newChat: boolean): Promise<void> {
+/** Add to (or start) chat. Keeps `@path:Lstart-end` when the uri is the active
+ * editor with a selection; otherwise references the selection or whole file. */
+async function addToChat(uri: vscode.Uri | undefined, newChat: boolean): Promise<void> {
   const editor = vscode.window.activeTextEditor;
-  const selected = editor?.document.getText(editor.selection);
-  if (!editor || !selected) {
-    void vscode.window.showInformationMessage(nls("CodePilot: select some code first."));
+  const selectionRef = selectionRefFor(editor, uri);
+  if (selectionRef) {
+    await focusView();
+    if (newChat) view?.command({ name: "new" });
+    view?.prompt("", false, [selectionRef]);
     return;
   }
+  if (uri instanceof vscode.Uri) {
+    await addResourceUri(uri, newChat);
+    return;
+  }
+  if (editor?.document.uri) {
+    await addResourceUri(editor.document.uri, newChat);
+    return;
+  }
+  void vscode.window.showInformationMessage(nls("CodePilot: pick a file or select some code first."));
+}
+
+/** When the active editor has a selection (optionally matching `uri`), return a ranged chip. */
+function selectionRefFor(
+  editor: vscode.TextEditor | undefined,
+  uri?: vscode.Uri,
+): { path: string; startLine: number; endLine: number } | undefined {
+  if (!editor || editor.selection.isEmpty) return undefined;
+  if (uri instanceof vscode.Uri && editor.document.uri.toString() !== uri.toString()) {
+    return undefined;
+  }
   const sel = editor.selection;
-  const rel = vscode.workspace.asRelativePath(editor.document.uri);
-  const fence = "```";
-  const text =
-    `${fence}${editor.document.languageId}\n` +
-    `// @${rel} L${sel.start.line + 1}-${sel.end.line + 1}\n${selected}\n${fence}`;
+  return {
+    path: vscode.workspace.asRelativePath(editor.document.uri),
+    startLine: sel.start.line + 1,
+    endLine: sel.end.line + 1,
+  };
+}
+
+/** Explorer / editor tab: add the file path as a chip reference. */
+async function addResourceUri(uri: vscode.Uri, newChat: boolean): Promise<void> {
+  if (uri.scheme !== "file") {
+    void vscode.window.showInformationMessage(nls("CodePilot: pick a file first."));
+    return;
+  }
+  const rel = vscode.workspace.asRelativePath(uri);
   await focusView();
-  // closeSession() is synchronous and the draft is not bound to a session, so
-  // opening a new chat before injecting cannot race the reference into the old
-  // session (the next real send lazily creates the fresh one).
   if (newChat) view?.command({ name: "new" });
-  view?.prompt(text, false);
+  view?.prompt("", false, [{ path: rel }]);
 }
 
 async function askSelection(): Promise<void> {
   const editor = vscode.window.activeTextEditor;
-  const selected = editor?.document.getText(editor.selection);
-  if (!editor || !selected) {
+  if (!editor || editor.selection.isEmpty) {
     void vscode.window.showInformationMessage(nls("CodePilot: select some code first."));
     return;
   }
@@ -295,12 +374,10 @@ async function askSelection(): Promise<void> {
     placeHolder: nls("What do you want to know?"),
   });
   if (question === undefined) return;
-  const fence = "```";
-  const text =
-    `${question || nls("Explain this code.")}\n\n` +
-    `${fence}${editor.document.languageId}\n// @${rel} L${sel.start.line + 1}-${sel.end.line + 1}\n${selected}\n${fence}`;
   await focusView();
-  view?.prompt(text, true);
+  view?.prompt(question || nls("Explain this code."), true, [
+    { path: rel, startLine: sel.start.line + 1, endLine: sel.end.line + 1 },
+  ]);
 }
 
 async function promptOnActiveFile(task: string): Promise<void> {

@@ -34,6 +34,10 @@
       "types": "./dist/serve-info.d.ts",
       "import": "./dist/serve-info.js"
     },
+    "./engine-connect": {
+      "types": "./dist/engineConnect.d.ts",
+      "import": "./dist/engineConnect.js"
+    },
     "./cli": {
       "types": "./dist/cli.d.ts",
       "import": "./dist/cli.js"

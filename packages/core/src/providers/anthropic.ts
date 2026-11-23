@@ -126,10 +126,14 @@ export class AnthropicProvider implements ChatProvider {
     // `cache_control` breakpoints. Prefer multi-block system (static policy +
     // stable env/memory) so a memory-index change does not invalidate the
     // policy prefix first (stable). Then last tool, then history.
-    // Never mark the volatile runtime_context / current turn.
+    // Volatile `<runtime_context>` is peeled out of `messages` into an
+    // *uncached* trailing system block — promoting it to `user` and merging
+    // into the preceding tool_results user turn would rewrite that turn on
+    // every subsequent request and bust the prefix (final-summary cache drop).
     const BREAKPOINT_CAP = 4;
     const systemParts = (opts.systemPromptBlocks?.filter((p) => p.trim().length > 0)
       ?? (opts.systemPrompt ? [opts.systemPrompt] : []));
+    const { history: historyMessages, runtimeNotes } = peelRuntimeContextMessages(opts.messages);
     const systemCached = systemParts.length > 0 && this.enableCaching;
     const systemBreakpoints = systemCached ? systemParts.length : 0;
     const toolCached =
@@ -137,7 +141,7 @@ export class AnthropicProvider implements ChatProvider {
     const fixedBreakpoints = systemBreakpoints + (toolCached ? 1 : 0);
     const historyBudget = Math.max(0, BREAKPOINT_CAP - fixedBreakpoints);
 
-    const anthropicMessages = mergeConsecutiveRoles(opts.messages.map(toAnthropicMessage));
+    const anthropicMessages = mergeConsecutiveRoles(historyMessages.map(toAnthropicMessage));
     const historyBreakpoints = markConversationCache(
       anthropicMessages,
       this.enableCaching,
@@ -155,18 +159,28 @@ export class AnthropicProvider implements ChatProvider {
     if (thinkingOn) {
       body.thinking = { type: "enabled", budget_tokens: budget };
     }
+    const systemBlocks: Array<Record<string, unknown>> = [];
     if (systemParts.length > 0) {
       if (this.enableCaching) {
-        body.system = systemParts.map((text) => ({
-          type: "text",
-          text,
-          cache_control: this.cacheControl,
-        }));
-      } else if (systemParts.length === 1) {
-        body.system = systemParts[0];
+        for (const text of systemParts) {
+          systemBlocks.push({ type: "text", text, cache_control: this.cacheControl });
+        }
       } else {
-        body.system = systemParts.map((text) => ({ type: "text", text }));
+        for (const text of systemParts) {
+          systemBlocks.push({ type: "text", text });
+        }
       }
+    }
+    // After the last cached system breakpoint: volatile runtime does not
+    // invalidate earlier cache hits (Anthropic: content past the last
+    // cache_control is outside the cached prefix).
+    for (const note of runtimeNotes) {
+      systemBlocks.push({ type: "text", text: note });
+    }
+    if (systemBlocks.length === 1 && !this.enableCaching && runtimeNotes.length === 0) {
+      body.system = systemParts[0];
+    } else if (systemBlocks.length > 0) {
+      body.system = systemBlocks;
     }
     if (opts.tools && opts.tools.length > 0) {
       body.tools = opts.tools.map((t, i, arr) =>
@@ -411,6 +425,45 @@ function toAnthropicTool(
   return out;
 }
 
+/**
+ * Lift harness `<runtime_context>` out of the conversation so it never becomes
+ * a `user` block that `mergeConsecutiveRoles` would glue onto tool_results.
+ * Returned notes ride an uncached trailing `system` text block instead.
+ */
+function peelRuntimeContextMessages(messages: ProviderMessage[]): {
+  history: ProviderMessage[];
+  runtimeNotes: string[];
+} {
+  const history: ProviderMessage[] = [];
+  const runtimeNotes: string[] = [];
+  for (const m of messages) {
+    if (m.role === "system") {
+      const text = m.content
+        .filter((c): c is { type: "text"; text: string } => c.type === "text")
+        .map((c) => c.text)
+        .join("\n");
+      if (text.includes("<runtime_context>")) {
+        runtimeNotes.push(text);
+        continue;
+      }
+    }
+    history.push(m);
+  }
+  return { history, runtimeNotes };
+}
+
+function contentHasRuntimeContext(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (c) =>
+      c &&
+      typeof c === "object" &&
+      (c as { type?: string; text?: string }).type === "text" &&
+      typeof (c as { text?: string }).text === "string" &&
+      (c as { text: string }).text.includes("<runtime_context>"),
+  );
+}
+
 function toAnthropicMessage(m: ProviderMessage): Record<string, unknown> {
   if (m.role === "system") {
  // Anthropic takes system as a top-level field; promote text.
@@ -494,12 +547,22 @@ function markConversationCache(
  * Anthropic requires alternating user/assistant roles. `system`-role messages
  * promoted to `user` above can place two `user`s in a row; merge adjacent
  * same-role messages by concatenating content blocks.
+ *
+ * Never glue a leftover `<runtime_context>` onto the preceding user turn —
+ * that rewrites already-sent tool_results and busts the prompt-cache prefix
+ * (OpenAI already has the same guard). Prefer `peelRuntimeContextMessages`.
  */
 function mergeConsecutiveRoles(
   messages: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
   return mergeAdjacentRoles(messages, (prev, cur) => {
     if (prev.role !== cur.role || !Array.isArray(prev.content) || !Array.isArray(cur.content)) {
+      return false;
+    }
+    if (
+      prev.role === "user" &&
+      (contentHasRuntimeContext(prev.content) || contentHasRuntimeContext(cur.content))
+    ) {
       return false;
     }
     prev.content = [...(prev.content as unknown[]), ...(cur.content as unknown[])];

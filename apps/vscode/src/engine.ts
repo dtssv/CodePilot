@@ -7,10 +7,13 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
 import WebSocket from "ws";
+import {
+  discoverOrSpawnDaemon,
+  serveInfoWsUrl,
+  type ServeInfo,
+} from "@codepilot/protocol/engine-connect";
 
 import type { CodepilotSettings } from "./config.js";
 import type { Event, UsageInfo } from "./types.js";
@@ -28,14 +31,6 @@ export declare interface Engine {
 }
 
 export type Spawner = typeof spawn;
-
-interface ServeInfoLite {
-  url: string;
-  token: string;
-  pid: number;
-  host: string;
-  port: number;
-}
 
 export class Engine extends EventEmitter {
   private proc: ChildProcessWithoutNullStreams | null = null;
@@ -296,34 +291,15 @@ export class Engine extends EventEmitter {
     const gen = ++this.generation;
     this.starting = true;
     try {
-      let info = await readLiveServeInfoLocal();
-      if (!info) {
-        const { cmd, args } = resolveLaunchCommand(this.settings(), this.bundledCliPath, "shared");
-        const child = this.spawner(cmd, args, {
-          cwd: this.cwd(),
-          stdio: ["ignore", "ignore", "pipe"],
-          env: engineEnv(),
-          detached: true,
-        });
-        try {
-          child.unref();
-        } catch {
-          /* ignore */
-        }
-        child.stderr?.setEncoding("utf8");
-        child.stderr?.on("data", (chunk: string) => this.emit("stderr", chunk));
-        info = await waitForLiveServeInfoLocal(15_000);
-        if (!info) {
-          try {
-            child.kill();
-          } catch {
-            /* ignore */
-          }
-          throw new Error(
-            `daemon did not publish ~/.codepilot/serve.json after \`${cmd} ${args.join(" ")}\``,
-          );
-        }
-      }
+      const { cmd, args } = resolveLaunchCommand(this.settings(), this.bundledCliPath, "shared");
+      // Orphan spawn via protocol — daemon is never a long-lived child of the
+      // extension host (avoids VS Code "running in background" on quit).
+      const { info } = await discoverOrSpawnDaemon({
+        command: cmd,
+        args,
+        cwd: this.cwd(),
+        env: engineEnv(),
+      });
       if (gen !== this.generation) return;
       await this.attachWs(info, gen);
     } catch (err) {
@@ -333,8 +309,8 @@ export class Engine extends EventEmitter {
     }
   }
 
-  private attachWs(info: ServeInfoLite, gen: number): Promise<void> {
-    const url = serveInfoWsUrlLocal(info);
+  private attachWs(info: ServeInfo, gen: number): Promise<void> {
+    const url = serveInfoWsUrl(info);
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(url);
       this.ws = ws;
@@ -443,62 +419,3 @@ export function tapServerLine(line: string, handlers: TapHandlers): void {
   }
 }
 
-/* ---- lockfile helpers (duplicated lightly so the extension host stays lean) ---- */
-
-function serveInfoPaths(): string[] {
-  const dir = join(homedir(), ".codepilot");
-  return [join(dir, "serve.json"), join(dir, "server.json")];
-}
-
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function readLiveServeInfoLocal(): Promise<ServeInfoLite | null> {
-  const { readFile, unlink } = await import("node:fs/promises");
-  for (const path of serveInfoPaths()) {
-    let info: ServeInfoLite;
-    try {
-      info = JSON.parse(await readFile(path, "utf-8")) as ServeInfoLite;
-    } catch {
-      continue;
-    }
-    if (!info?.url || typeof info.pid !== "number") continue;
-    const loopback =
-      info.host === "127.0.0.1" || info.host === "localhost" || info.host === "::1";
-    if (!loopback) continue;
-    if (!pidAlive(info.pid)) {
-      for (const p of serveInfoPaths()) {
-        try {
-          await unlink(p);
-        } catch {
-          /* ignore */
-        }
-      }
-      return null;
-    }
-    return info;
-  }
-  return null;
-}
-
-async function waitForLiveServeInfoLocal(timeoutMs: number): Promise<ServeInfoLite | null> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const info = await readLiveServeInfoLocal();
-    if (info) return info;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return readLiveServeInfoLocal();
-}
-
-function serveInfoWsUrlLocal(info: ServeInfoLite): string {
-  const base = info.url.replace(/\/$/, "");
-  if (!info.token) return base;
-  return `${base}${base.includes("?") ? "&" : "?"}token=${encodeURIComponent(info.token)}`;
-}

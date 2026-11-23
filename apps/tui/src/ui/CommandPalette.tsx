@@ -63,6 +63,15 @@ export function CommandPalette(props: CommandPaletteProps): React.ReactElement {
   const windowed = filtered.slice(windowStart, windowEnd);
   const hiddenAbove = windowStart;
   const hiddenBelow = filtered.length - windowEnd;
+  // The box keeps a constant row count. The "n more" rows used to appear and
+  // disappear as the selection crossed the window edge, which changed the box
+  // height by a line mid-list; Ink repaints only what moved, so a step left a
+  // stale blank row and the next appeared to skip an entry. The counts live in
+  // the title row instead and the body is padded, so the height never changes
+  // while the selection moves.
+  const bodyRows = Math.min(maxRows, Math.max(filtered.length, 1));
+  const padRows = Math.max(0, bodyRows - windowed.length);
+  const overflow = hiddenAbove + hiddenBelow > 0 ? `${sel + 1}/${filtered.length}` : "";
 
   return (
     <Box
@@ -72,41 +81,57 @@ export function CommandPalette(props: CommandPaletteProps): React.ReactElement {
       paddingX={1}
       marginBottom={0}
     >
-      <Box>
+      <Box flexShrink={0}>
         <Text color={color.accent}>{glyph.logo} </Text>
         <Text bold>Command</Text>
         <Text color={color.faint}>{query === "" ? " — type to filter" : ` — ${query}`}</Text>
+        {overflow ? <Text color={color.info}>{`  ${overflow}`}</Text> : null}
         <Box flexGrow={1} />
-        <Text color={color.faint}>↑↓ select · Tab complete · ↵ run · esc close</Text>
+        <Text color={color.faint} wrap="truncate-end">
+          ↑↓ select · Tab complete · ↵ run · esc close
+        </Text>
       </Box>
       {filtered.length === 0 ? (
-        <Box marginTop={1}>
+        <Box flexDirection="column" marginTop={1} flexShrink={0}>
           <Text color={color.faint}>No matching command. Try /help.</Text>
+          {Array.from({ length: Math.max(0, padRows - 1) }, (_, i) => (
+            <Text key={`pad-${i}`}> </Text>
+          ))}
         </Box>
       ) : (
-        <Box flexDirection="column" marginTop={1}>
-          {hiddenAbove > 0 ? (
-            <Text color={color.faint}>  ↑ {hiddenAbove} more</Text>
-          ) : null}
+        <Box flexDirection="column" marginTop={1} flexShrink={0}>
           {windowed.map((c, i) => {
             const idx = windowStart + i;
             const isSel = idx === sel;
             return (
-              <Box key={c.name}>
-                <Text color={isSel ? color.accent : color.faint}>
+              // Every row is exactly one line: a description long enough to wrap
+              // added a line the parent box then clipped, which shifted the rows
+              // below it and made an entry appear to vanish as the selection
+              // moved. Truncation keeps the row count equal to maxRows.
+              <Box key={c.name} flexShrink={0}>
+                <Text color={isSel ? color.accent : color.faint} wrap="truncate-end">
                   {isSel ? "▸ " : "  "}
                 </Text>
-                <Text bold={isSel} color={isSel ? color.accent : undefined}>
+                <Text bold={isSel} color={isSel ? color.accent : undefined} wrap="truncate-end">
                   /{c.name}
                 </Text>
-                {c.args ? <Text color={color.info}> {c.args}</Text> : null}
-                <Text color={color.faint}>  {c.description}</Text>
+                {c.args ? (
+                  <Text color={color.info} wrap="truncate-end">
+                    {" "}
+                    {c.args}
+                  </Text>
+                ) : null}
+                <Text color={color.faint} wrap="truncate-end">
+                  {"  "}
+                  {c.description}
+                </Text>
               </Box>
             );
           })}
-          {hiddenBelow > 0 ? (
-            <Text color={color.faint}>  ↓ {hiddenBelow} more — {sel + 1}/{filtered.length}</Text>
-          ) : null}
+          {/* Padding keeps the body height fixed while the window slides. */}
+          {Array.from({ length: padRows }, (_, i) => (
+            <Text key={`pad-${i}`}> </Text>
+          ))}
         </Box>
       )}
     </Box>

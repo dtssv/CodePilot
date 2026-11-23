@@ -504,7 +504,13 @@ describe("plugin-registered tools reach the session", () => {
       cwd: base, pluginTrust: APPROVE_ALL,
       model: "mock-large",
       provider,
-      config: { sandbox: { mode: "off" }, permissionMode: "yolo" } as never,
+      // deferredWire off so this test covers native FC for plugin tools;
+      // the deferred path is covered by deferredWire.test.ts / code_mode.
+      config: {
+        sandbox: { mode: "off" },
+        permissionMode: "yolo",
+        codeMode: { deferredWire: false },
+      } as never,
     });
     try {
       await session.prompt("please reverse abc");

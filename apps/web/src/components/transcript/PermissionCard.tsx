@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { PermissionResolution } from "@codepilot/core";
 import type { PendingPermission } from "../../protocol/client.js";
 import { t } from "../../i18n.js";
+import { localizePermissionReason } from "../../permissionReason.js";
 import { CheckIcon, ShieldIcon } from "../Icons.js";
 import { CategoryIcon } from "./icons.js";
 import { formatInput } from "./Steps.js";
@@ -42,7 +43,16 @@ export function PermissionCard({
         </span>
       </div>
       <div className="p-3">
-        {req.reason && <div className="mb-2 text-[12px] text-[var(--color-ink-dim)]">{req.reason}</div>}
+        {req.reason && (
+          <div className="mb-2 text-[12px] text-[var(--color-ink-dim)]">
+            {localizePermissionReason(req.reason)}
+          </div>
+        )}
+        {req.preview ? (
+          <pre className="mb-2 max-h-72 overflow-auto rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] p-2.5 font-mono text-[11.5px] leading-5 whitespace-pre-wrap text-[var(--color-ink)]">
+            {req.preview}
+          </pre>
+        ) : null}
         <pre className="max-h-64 overflow-auto rounded-lg border border-[var(--color-edge-subtle)] bg-[var(--color-surface-sunken)] p-2.5 text-[11.5px] leading-5 whitespace-pre-wrap text-[var(--color-ink)]">
           {formatInput(req.input)}
         </pre>
@@ -111,7 +121,7 @@ export function PermissionCard({
             <button type="button" onClick={() => onDecide("deny")} className="cp-btn-danger">
               {t("Deny")}
             </button>
-            {!req.sandboxExpand ? (
+            {!req.sandboxExpand && !req.sandboxEscalation ? (
               <button
                 type="button"
                 onClick={() => onDecide("always-project")}
@@ -127,11 +137,17 @@ export function PermissionCard({
               title={
                 req.sandboxExpand
                   ? t("Save this folder to sandbox.writablePaths for future sessions")
-                  : "Remember this command pattern for this session — other commands still ask"
+                  : req.sandboxEscalation
+                    ? t("Remember this unsandboxed pattern for this session")
+                    : "Remember this command pattern for this session — other commands still ask"
               }
               className="cp-btn-ghost"
             >
-              {req.sandboxExpand ? t("Always allow folder") : t("Always allow")}
+              {req.sandboxExpand
+                ? t("Always allow folder")
+                : req.sandboxEscalation
+                  ? t("Always allow unsandboxed")
+                  : t("Always allow")}
             </button>
             <button ref={allowRef} type="button" onClick={() => onDecide("allow")} className="cp-btn-primary">
               <CheckIcon className="h-3 w-3" />

@@ -19,24 +19,24 @@ export type SteerHost = {
   isBusy(): boolean;
   prompt(text: string, images?: ImageAttachment[], files?: PromptFile[]): Promise<void>;
   notify(e: Event): void;
+  /** Persist pending steers/follow-ups (fire-and-forget from mutators). */
+  persistInbox(): void;
 };
 
 /**
- * Queue a mid-run steering message. It is injected as a user message as soon
- * as the agent reaches an injection boundary — mid-stream before any tool call
- * starts, or right after the current tool batch — rather than waiting for the
- * next top-level turn. To make the mid-stream boundary reachable immediately,
- * this aborts only the in-flight provider stream (never the whole run), so any
- * text already generated is kept and the model re-samples with the correction
- * in view. Safe to call while a prompt is running or idle; messages queued
- * while idle are prepended to the next prompt's transcript.
+ * Queue a mid-run steering message. It is injected as a user message at the
+ * next turn boundary — after the in-flight model stream finishes and after any
+ * already-planned tool batch completes — so a correction never aborts the
+ * current step or marks remaining tools as interrupted. Safe while a prompt is
+ * running or idle; messages queued while idle are prepended to the next
+ * prompt's transcript.
  */
 export function steer(host: SteerHost, text: string): void {
   if (text.trim().length === 0) return;
   host.steeringQueue.push({ source: "user", text, delivery: "steer" });
-  // Wake the stream so the correction lands this turn, not the next one.
-  // Harmless when idle (a fresh controller is created on the next prompt).
-  host.steerController?.abort();
+  host.persistInbox();
+  // Do not abort the in-flight provider stream: waiting for the current step
+  // keeps tool batches intact and avoids "interrupted before this tool started".
 }
 
 /** Snapshot of prompts waiting to run after the current busy turn. */
@@ -64,6 +64,7 @@ export function enqueueFollowUp(
     queuedAt: Date.now(),
   };
   host.followUpQueue.push(item);
+  host.persistInbox();
   emitFollowUp(host, "queued");
   return item;
 }
@@ -73,6 +74,7 @@ export function removeFollowUp(host: SteerHost, id: string): boolean {
   const before = host.followUpQueue.length;
   host.followUpQueue = host.followUpQueue.filter((item) => item.id !== id);
   if (host.followUpQueue.length === before) return false;
+  host.persistInbox();
   emitFollowUp(host, "removed");
   return true;
 }
@@ -82,6 +84,7 @@ export function updateFollowUp(host: SteerHost, id: string, text: string): boole
   const item = host.followUpQueue.find((x) => x.id === id);
   if (!item) return false;
   item.text = text;
+  host.persistInbox();
   emitFollowUp(host, "updated");
   return true;
 }
@@ -96,6 +99,7 @@ export function sendFollowUpNow(host: SteerHost, id: string): "steered" | "start
   if (idx < 0) return false;
   const [item] = host.followUpQueue.splice(idx, 1);
   if (!item) return false;
+  host.persistInbox();
   emitFollowUp(host, "removed");
 
   if (host.isBusy()) {
@@ -117,6 +121,7 @@ export function sendFollowUpNow(host: SteerHost, id: string): "steered" | "start
 export function clearFollowUps(host: SteerHost): void {
   if (host.followUpQueue.length === 0) return;
   host.followUpQueue = [];
+  host.persistInbox();
   emitFollowUp(host, "cleared");
 }
 
@@ -143,6 +148,7 @@ export async function drainFollowUps(host: SteerHost): Promise<void> {
   try {
     while (!host.disposed && !host.isBusy() && host.followUpQueue.length > 0) {
       const next = host.followUpQueue.shift()!;
+      host.persistInbox();
       emitFollowUp(host, "started");
       await host.prompt(next.text, next.images, next.files);
     }

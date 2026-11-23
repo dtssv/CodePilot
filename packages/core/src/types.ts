@@ -55,7 +55,7 @@ export interface EventMeta {
 }
 
 /** Plan step progress.
- * Abandoned work is omitted from the next `plan_update`, not kept as a status.
+ * Abandoned work is omitted from the next `plan` update, not kept as a status.
  * Stuck work: ask the user (or `goal_status: blocked` inside a goal loop). */
 export type PlanStepStatus = "pending" | "in_progress" | "completed";
 
@@ -128,6 +128,10 @@ type EventBody =
  /** Set on the user message that opens a prompt (not on notices, steers or
   * task boundaries); the targets `/rewind` offers. */
       turnStart?: boolean;
+ /** Mid-run inject drained from the steering queue. Still a real user
+  * message for the model/transcript, but UIs should render it as an inline
+  * inject chip — not a new right-aligned chat bubble / Q&A break. */
+      steer?: boolean;
     }
  /** Rewind marker: the log from message `toMessageId` up to and including
   * this event is hidden from both the model view and the displayed history
@@ -210,9 +214,9 @@ type EventBody =
       type: "compaction";
       summary: string;
 /**
- * Context reduction kind: `"summary"` (default) compactor dropped old
- * history for an LLM summary (original turns stay on disk); `"micro-fold"`
- * folds old large tool_results to short stubs (lossless).
+ * Context reduction kind: `"summary"` (default) drops old history behind an
+ * LLM summary (original turns stay on disk); `"micro-fold"` keeps history
+ * but overlays short stubs onto old large tool_results via `folds`.
  */
       kind?: "summary" | "micro-fold";
  /**
@@ -221,6 +225,14 @@ type EventBody =
  * on resume without re-summarising.
  */
       keepFrom?: number;
+ /** `kind: "micro-fold"` stubs: each replaces the matching tool_result body in
+  * the model view; the full text stays earlier in the JSONL. */
+      folds?: Array<{
+        toolCallId: string;
+        content: string;
+        originalChars: number;
+        name?: string;
+      }>;
     }
  /**
   * A large payload was moved to the artifact store, leaving a head+tail stub in
@@ -230,15 +242,15 @@ type EventBody =
   | {
       type: "content_replacement";
       /** The event whose content was offloaded: the owning tool_call id for a
-       * tool_result, or the message id for an offloaded image. */
+       * tool_result / tool_call_input, or the message id for an offloaded image. */
       ownerId: string;
       /** What kind of payload was replaced. */
-      target: "tool_result" | "image";
+      target: "tool_result" | "image" | "tool_call_input";
       /** The content-addressed artifact ref the full payload now lives at. */
       artifactRef: string;
       /** Size of the replaced payload in bytes (pre-offload). */
       bytes: number;
-      /** Originating tool name, when the payload came from a tool_result. */
+      /** Originating tool name, when the payload came from a tool call/result. */
       tool?: string;
     }
   | {
@@ -328,7 +340,7 @@ type EventBody =
     }
   | { type: "mode"; mode: AgentMode }
   | { type: "mode_request"; mode: AgentMode; reason?: string; rememberAuto?: boolean }
- /** The model asked (via `start_goal`) to escalate the current task into a
+ /** The model asked (via `goal` action=start) to escalate the current task into a
   * long-horizon goal loop. The host picks this up and drives rounds via
   * `runGoal` on this session. Nothing auto-fires in core. */
   | { type: "goal_request"; objective: string; maxRounds?: number; reason?: string }
@@ -438,7 +450,7 @@ export interface TeamMessageEvent {
 
 /**
  * Collaboration mode. Controls which tools the model may call and shapes the
- * system prompt. `chat`: read-only Q&A. `plan`: read-only + `plan_update`.
+ * system prompt. `chat`: read-only Q&A. `plan`: read-only + `plan`.
  * `agent`: full autonomy (default; all tools).
  */
 export type AgentMode = "chat" | "plan" | "agent";
@@ -550,6 +562,17 @@ export interface PermissionRequest {
  * also persist it under `sandbox.writablePaths`.
  */
   sandboxExpand?: { path: string };
+ /**
+  * When set, this ask is a per-command sandbox jail drop (`escalate_sandbox`).
+  * Always allow grants a session-scoped escalation rule (not a normal bash
+  * allow); project-persist is disabled for this path.
+  */
+  sandboxEscalation?: true;
+  /**
+   * Precomputed human preview for the approval card (e.g. live-disk edit
+   * diff). UI-only — does not affect rule matching on `input`.
+   */
+  preview?: string;
 }
 
 /**
@@ -640,6 +663,9 @@ export interface McpServerConfig {
   oauthScopes?: string[];
   /** When true, keep the entry but do not start the server. */
   disabled?: boolean;
+  /** Per-server wall-clock for tool/resource/prompt calls (ms). Overrides
+   * global `mcpToolTimeoutMs` for this server only. */
+  timeoutMs?: number;
 }
 
 /** A user-configured lifecycle hook. */
@@ -756,7 +782,7 @@ export interface CodepilotConfig {
  * `openai`; other providers ignore it. */
   apiStyle?: "chat" | "responses";
   /** Extra HTTP headers merged into provider requests (gateway requirements
-   * such as OpenCode / OpenRouter). Auth headers still win on key collision. */
+   * such as OpenRouter). Auth headers still win on key collision. */
   headers?: Record<string, string>;
   permissionMode?: PermissionMode;
   maxTokens?: number;
@@ -765,22 +791,28 @@ export interface CodepilotConfig {
    * `window × compactionThreshold`; every provider request is hard-trimmed
    * to stay under the usable window (window − output reserve − system). */
   contextWindow?: number;
- /** Soft mid-history fold target (tokens). Opt-in: when unset, the send view
- * stays append-only until hard-window trim / auto-compact so prompt-cache
- * prefixes survive. When set, capped by `contextWindow`. */
+ /** Soft mid-history fold target (tokens), capped by `contextWindow`. Unset →
+  * no per-turn size-fold escalation. */
   maxContextTokens?: number;
- /** Rolling tool-output window: fold tool_results older than the keep window
- * down to this many (count-based, independent of token budget). Opt-in —
- * unset disables early mid-history rewrites; 0 folds all old results. */
+ /** Count-based fold cap: keep at most this many tool_results. Opt-in — a tight
+  * cap rewrites mid-history each turn and hurts prompt-cache hits. Unset → no
+  * mid-history fold; 0 folds all old results. */
   maxToolResultsInContext?: number;
+  /** Durable prune of old tool_result bodies (micro-fold overlay). Default
+   * **off**: the mid-history rewrite busts the prompt-cache prefix. Enable only
+   * when window pressure matters more than cache hits. */
+  toolResultPrune?: boolean;
+ /** Min chars for a tool_result to be prune-eligible (default 1200). */
+  toolResultPruneMinChars?: number;
+ /** Eligible chars that must accumulate before a prune pass runs (default 12000). */
+  toolResultPruneTriggerChars?: number;
  /** Hard upper bound on bytes `read_file` buffers for a single read. A file
   * larger than this is refused before its contents are read, so a huge file
   * cannot OOM the process. Default 64 MiB; line windows do not bypass it. */
   maxReadBytes?: number;
- /** `grep` search backend. "walker" (default) uses the built-in file walker
-  * (no native dependency). "rg" shells out to ripgrep on PATH (walker fallback
-  * if absent/failed); "auto" prefers ripgrep when installed for speed on large
-  * trees, else the walker. */
+ /** `grep` search backend. "rg" (default) / "auto" use packaged `@vscode/ripgrep`
+  * or `rg` on PATH (walker fallback if absent/failed). "walker" forces the
+  * dependency-free JS file walker. */
   grep?: { backend?: "walker" | "rg" | "auto" };
  /** Auto-compaction trigger as a fraction of the context window (0–1).
  * Default 0.92. Checked before each model turn during a long tool loop,
@@ -797,8 +829,8 @@ export interface CodepilotConfig {
   * A manual `/compact` can still run and, if it gets back under budget,
   * re-enables auto-compaction. Default 3. */
   autoCompactMaxConsecutiveFailures?: number;
- /** Files re-attached (current disk content) after a summary compaction drops
-  * the turns that read them. Default 5; 0 disables. */
+ /** Paths listed (not body-inlined) after a summary compaction drops the turns
+  * that read them. Default 5; 0 disables the list. */
   compactRestoreFiles?: number;
  /** Snapshot the whole workspace (shadow git repo) around each turn so /undo
   * also reverts files changed by bash/MCP. Git workspaces only. Default true. */
@@ -916,6 +948,10 @@ export interface CodepilotConfig {
   mcpToolDiscovery?: "auto" | "lazy" | "eager";
  /** Tool-count threshold for `auto` to switch from eager to lazy. Default 2. */
   mcpLazyThreshold?: number;
+ /** Wall-clock ceiling (ms) for a single MCP tool/resource/prompt call. Default 60000. */
+  mcpToolTimeoutMs?: number;
+ /** Wall-clock ceiling (ms) for MCP initialize + list discovery. Default 120000. */
+  mcpStartupTimeoutMs?: number;
  /** Progressive disclosure for plugin-contributed tools, mirroring the MCP
   * controls. "eager" (default) advertises every plugin tool schema each turn;
   * "lazy" (or "auto" past `pluginLazyThreshold`) hides the individual schemas
@@ -1000,12 +1036,17 @@ export interface CodepilotConfig {
   * names or `tool::glob` patterns that are never counted toward the
   * exact-repetition or rotating-batch layers (dedup replay still applies). */
   doomLoop?: DoomLoopConfig;
- /** code_mode execution runtime. "vm" (default) runs the model's JavaScript in
-  * an in-process Node vm context; "subprocess" runs it in a separate Node child
-  * wrapped by the same OS sandbox as `bash` (a stronger isolation boundary,
-  * opt-in). The delegated tool calls are proxied back to the parent either way,
-  * so both runtimes expose the same API and the same path guard. */
-  codeMode?: { enabled?: boolean; runtime?: "vm" | "subprocess" };
+ /** code_mode runtime: "vm" (default, in-process Node vm) or "subprocess" (a
+  * child wrapped by the `bash` OS sandbox). Either way tool calls proxy back to
+  * the parent, so the API and path guard are identical.
+  * `deferredWire` (default true): only a small direct allowlist rides the
+  * provider `tools[]`; MCP/plugin and other builtins are reached via
+  * `code_mode.tools.search/describe/call`. */
+  codeMode?: {
+    enabled?: boolean;
+    runtime?: "vm" | "subprocess";
+    deferredWire?: boolean;
+  };
  /** Per-model tool-exposure downgrade. Each rule hides `drop` tools from any
   * model whose id glob-matches an entry in `models`. Applied after mode
   * filtering, so it can only remove tools. Lets a deployment keep the complex
@@ -1112,7 +1153,7 @@ export interface CodepilotConfig {
   memoryConsolidationMinDrafts?: number;
  /** Directory for plan files. Default: `~/.codepilot/projects/<hash>/plans`.
  * Absolute, or relative to the project root when set. Plan files are
- * written here when the agent calls `plan_done`. */
+ * written here when the agent calls `plan` with action=done. */
   plansDirectory?: string;
  /** Directory for spec-driven-development artifacts (requirements.md /
  * design.md / tasks.md, one sub-folder per feature). Default:
@@ -1213,6 +1254,12 @@ export interface WebFetchConfig {
   blockedDomains?: string[];
  /** Cache TTL in minutes (default 15; set 0 to disable caching). */
   cacheTtlMinutes?: number;
+  /**
+   * When true, allow fetches whose DNS resolves to loopback / RFC1918 /
+   * link-local / ULA. Default false (SSRF gate). Residual DNS-rebinding after
+   * the preflight lookup is accepted without a network proxy.
+   */
+  allowLocal?: boolean;
 }
 
 /** image_gen configuration. Points at any OpenAI-images-compatible endpoint
@@ -1344,7 +1391,7 @@ export interface SessionOptions {
  * "open the diff" only makes sense in an IDE). */
   hostSurface?: "cli" | "tui" | "vscode" | "idea";
   onPermissionRequest?: (req: PermissionRequest) => Promise<PermissionResolution>;
- /** Host handler for structured user questions (ask_user_question / plan_done). */
+ /** Host handler for structured user questions (ask_user_question / plan action=done). */
   onAskUser?: (req: QuestionRequest) => Promise<QuestionAnswers>;
  /** Handler for MCP server-initiated requests (`elicitation/create`,
  * `sampling/createMessage`). When unset, such requests are rejected
@@ -1361,7 +1408,7 @@ export interface SessionOptions {
  * returns; the core handles the redirect listener + token exchange. When unset,
  * OAuth-requiring servers fail with a 401 instead of launching a browser flow. */
   onMcpOpenAuthUrl?: (serverName: string, authorizationUrl: string) => void | Promise<void>;
- /** Host handler for `start_goal`: the model asked to escalate the current
+ /** Host handler for `goal` action=start: the model asked to escalate the current
   * task into a long-horizon goal loop. The host should drive rounds (e.g. via
   * `runGoal` on this session) and return true if it accepted. When unset, the
   * `goal_request` event still emits for stream consumers, but the tool tells

@@ -6,7 +6,9 @@ import {
   decideLazyMcp,
   buildProviderMessages,
   buildProviderToolDefs,
+  selectToolsForTurn,
 } from "../agent/agent-messages.js";
+import { resolveDeferredWire } from "../tools/wirePolicy.js";
 import {
   compactionGeometry,
   DEFAULT_COMPACTION_FRACTION,
@@ -15,6 +17,9 @@ import {
   mergeCompactInstructions,
   renderTranscriptArchive,
   shouldCompact,
+  planToolResultPrune,
+  applyToolResultPruneOverlays,
+  microFoldEventFromPlan,
 } from "./compaction.js";
 import { estimateTokens, lookupContextWindow } from "./tokens.js";
 import type { CompactionResult } from "./compaction.js";
@@ -48,8 +53,11 @@ export type CompactHost = {
   persisted: Event[];
   lastProviderInputTokens: number;
   contextAnchor: { input: number; eventCount: number } | null;
+  foldedToolResultStubs: Map<string, string>;
   systemPromptCache: SystemPromptCache;
   toolRegistry: ToolRegistry;
+  /** Session-monotonic wire tool names (prompt-cache stability). */
+  advertisedToolNames: Set<string>;
   mode: AgentMode;
   providerOverride: ChatProvider | undefined;
   hooks: HookEngine;
@@ -205,33 +213,43 @@ export function contextReport(host: CompactHost): {
     host.config.pluginToolDiscovery ?? "eager",
     host.config.pluginLazyThreshold,
   );
-  // Start mode-filtered (keeps MCP/plugin tools visible so the deferred buckets
-  // can be estimated), then apply the per-model toolExposure downgrade so a
-  // tool the provider request drops is not counted toward the send total.
-  let visibleTools = filterToolsByModeFromRegistry(host.toolRegistry, host.mode);
-  if (host.config.toolExposure && host.config.toolExposure.length > 0) {
-    visibleTools = filterToolsByModel(visibleTools, host.model, host.config.toolExposure);
-  }
-  for (const t of visibleTools) {
+  // Match the provider tools array (mode → lazy → exposure → stabilize).
+  const deferredWire = resolveDeferredWire(host.config);
+  const wireTools = selectToolsForTurn(host.toolRegistry, host.mode, {
+    lazyMcp,
+    lazyPlugin,
+    model: host.model,
+    toolExposure: host.config.toolExposure,
+    previouslyAdvertised: host.advertisedToolNames,
+    deferredWire,
+  });
+  const wireNames = new Set(wireTools.map((t) => t.name));
+  for (const t of wireTools) {
     const def = {
       name: t.name,
       description: t.description,
       inputSchema: zodToJsonSchema(t.inputSchema),
     };
     const tok = estimateTokens(JSON.stringify(def));
-    if (t.source === "mcp") {
-      // Under lazy discovery these schemas ride the `mcp` meta-tool on demand,
-      // not the per-turn request, so they are deferred (shown, not counted).
-      if (lazyMcp) mcpDeferredTokens += tok;
-      else mcpTokens += tok;
-    } else if (t.source === "plugin") {
-      // Under lazy plugin discovery these ride the `tool_catalog` meta-tool on
-      // demand, so they are deferred (shown, not counted toward the total).
-      if (lazyPlugin) pluginDeferredTokens += tok;
-      else toolTokens += tok;
-    } else {
-      toolTokens += tok;
-    }
+    if (t.source === "mcp") mcpTokens += tok;
+    else toolTokens += tok;
+  }
+  // Deferred: mode-visible MCP/plugin schemas that lazy discovery hid and
+  // stabilize has not stuck on the wire yet (still reachable via meta-tools).
+  let modeVisible = filterToolsByModeFromRegistry(host.toolRegistry, host.mode);
+  if (host.config.toolExposure && host.config.toolExposure.length > 0) {
+    modeVisible = filterToolsByModel(modeVisible, host.model, host.config.toolExposure);
+  }
+  for (const t of modeVisible) {
+    if (wireNames.has(t.name)) continue;
+    const def = {
+      name: t.name,
+      description: t.description,
+      inputSchema: zodToJsonSchema(t.inputSchema),
+    };
+    const tok = estimateTokens(JSON.stringify(def));
+    if (t.source === "mcp" && lazyMcp) mcpDeferredTokens += tok;
+    else if (t.source === "plugin" && lazyPlugin) pluginDeferredTokens += tok;
   }
   // Event-log tokens split into conversation vs sub-agent work.
   let subagentTokens = 0;
@@ -334,6 +352,8 @@ export async function preciseContextCount(
       lazyMcp,
       model: host.model,
       toolExposure: host.config.toolExposure,
+      previouslyAdvertised: host.advertisedToolNames,
+      deferredWire: resolveDeferredWire(host.config),
     });
     const res = await provider.countTokens({
       model: host.model,
@@ -345,6 +365,55 @@ export async function preciseContextCount(
   } catch {
     return null;
   }
+}
+
+/**
+ * Persist stubs for old, already-seen tool_result bodies when enough eligible
+ * chars have piled up. Skips when an auto summary compaction is about to run
+ * (that pass drops the same region; rewriting it first only busts the cache).
+ * Returns true when a micro-fold event was appended.
+ */
+export async function sessionMaybePruneToolResults(host: CompactHost): Promise<boolean> {
+  if (host.disposed) return false;
+  // Default OFF: rewriting already-sent tool_result bodies busts the
+  // prompt-cache prefix. Opt in with `toolResultPrune: true`.
+  if (host.config.toolResultPrune !== true) return false;
+
+  const modelWindow = lookupContextWindow(host.model);
+  const window = host.config.contextWindow ?? modelWindow.contextWindow;
+  const trigger = compactionGeometry({
+    window,
+    thresholdFraction: host.config.compactionThreshold,
+    maxTokens: host.config.maxTokens,
+    maxOutputTokens: modelWindow.maxOutputTokens,
+  }).hardTrigger;
+  const aboutToAutoCompact =
+    host.config.autoCompact !== false &&
+    !host.autoCompactDisabled &&
+    shouldCompact(host.events, { contextWindow: trigger }).shouldCompact;
+  if (aboutToAutoCompact) return false;
+
+  const plan = planToolResultPrune(host.events, {
+    ...(host.config.toolResultPruneMinChars !== undefined
+      ? { minChars: host.config.toolResultPruneMinChars }
+      : {}),
+    ...(host.config.toolResultPruneTriggerChars !== undefined
+      ? { triggerChars: host.config.toolResultPruneTriggerChars }
+      : {}),
+    stubMemo: host.foldedToolResultStubs,
+  });
+  if (!plan) return false;
+
+  const ev = microFoldEventFromPlan(plan);
+  host.events.push(ev);
+  await host.persistEvent(ev);
+  host.notify(ev);
+  host.events = applyToolResultPruneOverlays(host.events);
+  // Mid-history bodies changed — the next send re-bills a new prefix.
+  host.contextChangedForNextTurn = true;
+  host.contextAnchor = null;
+  host.lastProviderInputTokens = 0;
+  return true;
 }
 
 export async function sessionMaybeCompact(
@@ -436,6 +505,9 @@ export async function sessionMaybeCompact(
   // re-bills a different prompt. Drop it so the estimate rebuilds from the
   // post-compaction event log.
   host.contextAnchor = null;
+  // Prefix replaced — drop frozen stubs so the post-compaction send view
+  // can re-derive cleanly from the new live transcript.
+  host.foldedToolResultStubs.clear();
   // compaction appends only what it synthesised (summary boundary + rescued
   // plan); the retained tail is already on disk and never re-appended. "New"
   // is decided by stable link id, not object reference, since `compact()`
@@ -603,6 +675,7 @@ export async function clearWorkingContext(
   host.events = next;
   host.lastProviderInputTokens = 0;
   host.contextAnchor = null;
+  host.foldedToolResultStubs.clear();
   for (const e of next) {
     if (host.persisted.includes(e)) continue;
     await host.persistEvent(e).catch(() => undefined);

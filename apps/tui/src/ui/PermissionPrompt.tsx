@@ -17,6 +17,8 @@ export interface PermissionPromptProps {
   toolName: string;
   input: unknown;
   reason: string;
+  /** Live-disk before/after preview (preferred over raw search/replace). */
+  preview?: string;
   onDecide: (resolution: PermissionResolution) => void;
 }
 
@@ -31,7 +33,7 @@ const OPTIONS: { label: string; keyHint: string; action: OptionAction; hint: str
 ];
 
 export function PermissionPrompt(props: PermissionPromptProps): React.ReactElement {
-  const { toolName, input, reason, onDecide } = props;
+  const { toolName, input, reason, preview, onDecide } = props;
   const [idx, setIdx] = React.useState(0);
   // When true, the prompt switches to a one-line feedback editor; Enter submits
   // the typed correction as a decline-with-feedback, Esc cancels back to the
@@ -101,7 +103,7 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
       </Box>
       {reason ? <Text color={color.faint}>{reason}</Text> : null}
 
-      <DetailPreview toolName={toolName} input={input} />
+      {preview ? <LivePreview text={preview} /> : <DetailPreview toolName={toolName} input={input} />}
 
       {feedbackMode ? (
         <Box flexDirection="column" marginTop={1}>
@@ -139,6 +141,30 @@ export function PermissionPrompt(props: PermissionPromptProps): React.ReactEleme
           </Box>
         </>
       )}
+    </Box>
+  );
+}
+
+/** Precomputed live-disk diff from core (`req.preview`). */
+function LivePreview({ text }: { text: string }): React.ReactElement {
+  const lines = text.replace(/\n$/, "").split("\n");
+  const max = 40;
+  return (
+    <Box flexDirection="column" marginTop={1} borderStyle="single" borderColor={color.edge} paddingX={1}>
+      {lines.slice(0, max).map((line, i) => {
+        const tone =
+          line.startsWith("+") && !line.startsWith("+++")
+            ? color.add
+            : line.startsWith("-") && !line.startsWith("---")
+              ? color.remove
+              : color.faint;
+        return (
+          <Text key={i} color={tone}>
+            {oneLine(line, 120)}
+          </Text>
+        );
+      })}
+      {lines.length > max ? <Text color={color.faint}>  … {lines.length - max} more lines</Text> : null}
     </Box>
   );
 }

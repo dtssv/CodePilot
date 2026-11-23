@@ -22,27 +22,46 @@ export function isAbortMessage(message: string): boolean {
 }
 
 /**
- * Whether a tool can run concurrently with others in the same turn. Read-only
- * and network tools parallelize; write/execute tools serialize. Fail-closed:
- * unknown permission is NOT parallel-safe.
+ * Whether a tool can run concurrently with others in the same turn based on
+ * its permission tier alone. Read-only and network tools parallelize;
+ * write/execute tools serialize. Fail-closed: unknown permission is NOT
+ * parallel-safe. Prefer {@link ToolDef.concurrencySafe} when a tool can prove
+ * a specific call is read-only (e.g. `git status`).
  */
 export function isParallelSafeTool(permission: PermissionLevel | undefined): boolean {
   return permission === "read" || permission === "network";
 }
 
+/** Result stub for tool calls skipped because a mid-run steer arrived. */
+const STEER_SKIPPED_RESULT: ToolExecResult = {
+  content:
+    "[interrupted: a user message was injected before this tool started, so it had no effect. " +
+    "It is safe to re-issue the call if still needed.]",
+  isError: true,
+};
+
 /**
- * Execute a turn's tool calls with a read/write concurrency barrier, returning
- * results in original call order. Adjacent parallel-safe calls run concurrently;
- * mutating calls run exclusively. Reads parallelize, writes serialize.
+ * Execute a turn's tool calls with a read/write barrier, returning results in
+ * original call order. Reads parallelize, writes serialize.
+ *
+ * `shouldPause`: checked between batches after the first; when true the rest are
+ * marked interrupted, so a mid-tools steer lands at the next turn boundary
+ * sooner. Callers gate out steers that were already pending when tools began.
  */
 export async function runToolsWithBarrier<T>(
   calls: readonly T[],
   isParallelSafe: (call: T) => boolean,
   run: (call: T) => Promise<ToolExecResult>,
+  opts?: { shouldPause?: () => boolean },
 ): Promise<ToolExecResult[]> {
   const results = new Array<ToolExecResult>(calls.length);
   let i = 0;
+  let finishedBatch = false;
   while (i < calls.length) {
+    if (finishedBatch && opts?.shouldPause?.()) {
+      for (; i < calls.length; i++) results[i] = { ...STEER_SKIPPED_RESULT };
+      break;
+    }
     if (isParallelSafe(calls[i]!)) {
       // Gather the maximal run of adjacent parallel-safe calls and run them
       // together; a mutating call (or the end) closes the batch.
@@ -55,6 +74,7 @@ export async function runToolsWithBarrier<T>(
       results[i] = await run(calls[i]!);
       i++;
     }
+    finishedBatch = true;
   }
   return results;
 }

@@ -117,6 +117,65 @@ export async function rewindSession(
   return host.call("session/rewind", { sessionId, ...opts });
 }
 
+export async function gcSessionArtifacts(
+  host: ClientRpcHost,
+  sessionId: string,
+  dryRun?: boolean,
+): Promise<{ removed: number; bytesReclaimed: number; scanned: number; referenced: number }> {
+  return host.call("session/gc-artifacts", { sessionId, dryRun });
+}
+
+export async function exportSessionTranscript(
+  host: ClientRpcHost,
+  sessionId: string,
+  format?: "markdown" | "jsonl",
+): Promise<{ format: "markdown" | "jsonl"; body: string; suggestedName: string }> {
+  return host.call("session/export", { sessionId, format });
+}
+
+export async function startSessionGoal(
+  host: ClientRpcHost,
+  sessionId: string,
+  objective: string,
+  maxRounds?: number,
+): Promise<{ accepted: true; running: boolean }> {
+  return host.call("session/goal", { sessionId, objective, maxRounds });
+}
+
+export async function setPermissionMode(
+  host: ClientRpcHost,
+  sessionId: string,
+  mode: import("@codepilot/core").PermissionMode,
+): Promise<{ mode: import("@codepilot/core").PermissionMode }> {
+  return host.call("session/setPermissionMode", { sessionId, mode });
+}
+
+export async function setPreset(
+  host: ClientRpcHost,
+  sessionId: string,
+  preset: import("@codepilot/core").PermissionPresetName,
+): Promise<{
+  preset: import("@codepilot/core").PermissionPresetName;
+  permissionMode: import("@codepilot/core").PermissionMode;
+  sandbox: { mode: string; unavailable?: boolean; backend?: string };
+}> {
+  return host.call("session/setPreset", { sessionId, preset });
+}
+
+export async function describeSessionHooks(
+  host: ClientRpcHost,
+  sessionId: string,
+): Promise<{ text: string }> {
+  return host.call("session/describeHooks", { sessionId });
+}
+
+export async function describeSessionAgents(
+  host: ClientRpcHost,
+  opts?: { sessionId?: string; cwd?: string },
+): Promise<{ text: string }> {
+  return host.call("session/describeAgents", opts ?? {});
+}
+
 export async function listTerminalShells(host: ClientRpcHost): Promise<{
   platform: "darwin" | "linux" | "win32" | "other";
   shells: Array<{ id: string; path: string; label: string }>;

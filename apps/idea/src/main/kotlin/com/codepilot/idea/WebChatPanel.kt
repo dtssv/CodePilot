@@ -11,8 +11,6 @@ import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.vfs.LocalFileSystem
-import com.intellij.openapi.wm.ToolWindowManager
-import com.intellij.openapi.wm.ex.ToolWindowEx
 import com.intellij.ui.JBColor
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
@@ -49,8 +47,7 @@ class WebChatPanel private constructor(
         openFile = ::openFile,
         insertText = ::insertText,
         onEngineError = { log.warn("codepilot engine: $it") },
-        onExpandForSettings = ::expandToolWindow,
-        onRestoreAfterSettings = ::restoreToolWindow,
+        onOpenSettings = ::openSettings,
     )
 
     private val engine = SharedEngineProcess(
@@ -92,59 +89,31 @@ class WebChatPanel private constructor(
 
     private var widthBeforeSettings: Int = 0
 
-    /** Focus + stretch the CodePilot tool window so in-panel Settings has room. */
-    private fun expandToolWindow() {
-        ApplicationManager.getApplication().invokeLater {
-            val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return@invokeLater
-            tw.show(null)
-            tw.activate({
-                // Wait one layout pass — width is often 0 before the first show.
-                ApplicationManager.getApplication().invokeLater {
-                    try {
-                        val ex = tw as? ToolWindowEx ?: return@invokeLater
-                        val current = tw.component.width.coerceAtLeast(0)
-                        widthBeforeSettings = current
-                        val frameW = tw.component.topLevelAncestor?.width?.takeIf { it > 0 } ?: 1400
-                        val target = (frameW * 55 / 100).coerceIn(720, 1100)
-                        if (current < target) {
-                            ex.stretchWidth(target - current)
-                            log.info("CodePilot settings expand: ${current}px → ${target}px")
-                        }
-                    } catch (t: Throwable) {
-                        log.info("stretchWidth unavailable: ${t.message}")
-                    }
-                }
-            }, true)
-        }
-    }
-
-    /** Shrink back toward the pre-settings width after Settings closes. */
-    private fun restoreToolWindow() {
-        ApplicationManager.getApplication().invokeLater {
-            val tw = ToolWindowManager.getInstance(project).getToolWindow("CodePilot") ?: return@invokeLater
-            try {
-                val ex = tw as? ToolWindowEx ?: return@invokeLater
-                val target = if (widthBeforeSettings > 0) widthBeforeSettings else 420
-                val current = tw.component.width.coerceAtLeast(0)
-                if (current > target) ex.stretchWidth(target - current)
-            } catch (t: Throwable) {
-                log.info("restore stretchWidth unavailable: ${t.message}")
-            }
-        }
-    }
-
-    /** Command-palette / actions: expand panel and open the Settings sheet. */
-    override fun openSettings() = relay.openSettings()
-
-    override fun addEditorContext(filePath: String, language: String?, snippet: String, newChat: Boolean) {
-        val rel = project.basePath?.let { base -> File(filePath).relativeToOrNull(File(base))?.path } ?: filePath
-        val lang = language?.lowercase().orEmpty()
+    override fun addReference(path: String, startLine: Int?, endLine: Int?, newChat: Boolean) {
         // closeSession() in the page is synchronous and the draft is not bound to
         // a session, so opening a new chat before injecting cannot race the
         // reference into the old session.
         if (newChat) relay.command("new")
-        relay.prompt("```$lang\n// @$rel\n$snippet\n```", send = false)
+        relay.prompt("", send = false, refs = listOf(CodeRef(relativePath(path), startLine, endLine)))
     }
+
+    override fun askAboutCode(path: String, startLine: Int?, endLine: Int?, question: String) {
+        relay.prompt(question, send = true, refs = listOf(CodeRef(relativePath(path), startLine, endLine)))
+    }
+
+    /**
+     * Command-palette / actions: open Settings as an editor tab (wide, side-by-side).
+     * Called from a CEF thread when the page asks for it — `openFile` requires EDT.
+     */
+    override fun openSettings(section: String?) {
+        ApplicationManager.getApplication().invokeLater {
+            SettingsEditor.open(project, section)
+        }
+    }
+
+    /** Project-relative path when [path] lives under the project root, else unchanged. */
+    private fun relativePath(path: String): String =
+        project.basePath?.let { base -> File(path).relativeToOrNull(File(base))?.path } ?: path
 
     override fun dispose() {
         engine.stop()
@@ -196,7 +165,10 @@ class WebChatPanel private constructor(
 
  /** The JCEF panel, or null when JCEF or the bundled UI is unavailable. */
         fun createOrNull(project: Project): WebChatPanel? {
-            if (!JBCefApp.isSupported()) return null
+            // JCEF is an optional dependency: on platforms where it is missing
+            // (or disabled) the class loader throws NoClassDefFoundError here.
+            val supported = try { JBCefApp.isSupported() } catch (t: Throwable) { false }
+            if (!supported) return null
             val html = WebChatPanel::class.java.getResourceAsStream(RESOURCE)?.use { it.readBytes().toString(Charsets.UTF_8) }
                 ?: return null
             return WebChatPanel(project, html)

@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 
 import type { SessionSummary } from "@codepilot/core";
 
 import { sameCwd } from "../../prefs.js";
 import { t } from "../../i18n.js";
 import { ChevronIcon, FolderIcon, PlusIcon, SearchIcon, XIcon } from "../Icons.js";
+import { ContextMenu, openContextMenu, type ContextMenuState } from "../ContextMenu.js";
 import { DEFAULT_SESSION_PREVIEW, SESSION_PAGE_SIZE, SessionRow } from "./SessionList.js";
 import { SessionActions } from "./SessionActions.js";
 import { NewButton } from "./NewButton.js";
@@ -24,6 +25,8 @@ export function WorkspaceSessionNav({
   emptyText,
   sessionIcon,
   canOpenNewWorkspace = true,
+  /** Primary capability rows under New (e.g. Skills · Connectors). */
+  primaryNav,
   onOpenWorkspace,
   onCloseWorkspace,
   onOpenNewWorkspace,
@@ -45,6 +48,7 @@ export function WorkspaceSessionNav({
   sessionIcon?: React.ReactNode;
   /** When false, hide “Open workspace…” (e.g. remote control). */
   canOpenNewWorkspace?: boolean;
+  primaryNav?: React.ReactNode;
   onOpenWorkspace(cwd: string): void;
   onCloseWorkspace(cwd: string): void;
   onOpenNewWorkspace(): void;
@@ -67,9 +71,19 @@ export function WorkspaceSessionNav({
   const [showArchived, setShowArchived] = useState<Record<string, boolean>>({});
   // Which session row's ··· menu is open (by session id).
   const [menuFor, setMenuFor] = useState<string | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<ContextMenuState | null>(null);
+  const closeCtx = useCallback(() => setCtxMenu(null), []);
   // Keep the search bar visible while typing — never gate it on filtered count
   // (that used to unmount the input as soon as matches dropped ≤ 6).
   const showSearch = sessions.length > 6 || query.length > 0;
+
+  const openWorkspaceFolder = (cwd: string): void => {
+    try {
+      window.codepilotDesktop?.openPath(cwd);
+    } catch {
+      /* browser / unsupported host */
+    }
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -85,6 +99,7 @@ export function WorkspaceSessionNav({
           title={activeCwd ? undefined : t("Select a workspace first")}
         />
       </div>
+      {primaryNav}
       {canOpenNewWorkspace && (
         <div className="px-2 pb-2">
           <button
@@ -155,6 +170,30 @@ export function WorkspaceSessionNav({
                 className={`group flex items-center gap-0.5 rounded-lg px-1 py-0.5 ${
                   active ? "text-[var(--color-ink)]" : "text-[var(--color-ink-dim)]"
                 }`}
+                onContextMenu={(e) => {
+                  openContextMenu(
+                    e,
+                    [
+                      {
+                        id: "open",
+                        label: t("Open folder"),
+                        onSelect: () => openWorkspaceFolder(ws),
+                      },
+                      {
+                        id: "focus",
+                        label: t("Open workspace"),
+                        onSelect: () => onOpenWorkspace(ws),
+                      },
+                      {
+                        id: "close",
+                        label: t("Close workspace"),
+                        danger: true,
+                        onSelect: () => onCloseWorkspace(ws),
+                      },
+                    ],
+                    setCtxMenu,
+                  );
+                }}
               >
                 <button
                   type="button"
@@ -213,6 +252,41 @@ export function WorkspaceSessionNav({
                         }}
                         onPin={onPinSession ? () => { setMenuFor(null); onPinSession(s.id, !s.pinned); } : undefined}
                         onArchive={onArchiveSession ? () => { setMenuFor(null); onArchiveSession(s.id, true); } : undefined}
+                        onContextMenu={(e) => {
+                          const items = [
+                            {
+                              id: "copy-title",
+                              label: t("Copy title"),
+                              onSelect: () => {
+                                void navigator.clipboard?.writeText(s.title || s.id);
+                              },
+                            },
+                            ...(onPinSession
+                              ? [
+                                  {
+                                    id: "pin",
+                                    label: s.pinned ? t("Unpin") : t("Pin"),
+                                    onSelect: () => onPinSession(s.id, !s.pinned),
+                                  },
+                                ]
+                              : []),
+                            {
+                              id: "open-folder",
+                              label: t("Open folder"),
+                              onSelect: () => openWorkspaceFolder(s.cwd || ws),
+                            },
+                            ...(onArchiveSession
+                              ? [
+                                  {
+                                    id: "archive",
+                                    label: t("Archive"),
+                                    onSelect: () => onArchiveSession(s.id, true),
+                                  },
+                                ]
+                              : []),
+                          ];
+                          openContextMenu(e, items, setCtxMenu);
+                        }}
                       />
                     ))}
                   </div>
@@ -299,6 +373,30 @@ export function WorkspaceSessionNav({
                               onUnarchive={
                                 onArchiveSession ? () => { setMenuFor(null); onArchiveSession(s.id, false); } : undefined
                               }
+                              onContextMenu={(e) => {
+                                openContextMenu(
+                                  e,
+                                  [
+                                    {
+                                      id: "copy-title",
+                                      label: t("Copy title"),
+                                      onSelect: () => {
+                                        void navigator.clipboard?.writeText(s.title || s.id);
+                                      },
+                                    },
+                                    ...(onArchiveSession
+                                      ? [
+                                          {
+                                            id: "unarchive",
+                                            label: t("Unarchive"),
+                                            onSelect: () => onArchiveSession(s.id, false),
+                                          },
+                                        ]
+                                      : []),
+                                  ],
+                                  setCtxMenu,
+                                );
+                              }}
                             />
                           ))}
                         </div>
@@ -311,6 +409,7 @@ export function WorkspaceSessionNav({
           );
         })}
       </div>
+      <ContextMenu menu={ctxMenu} onClose={closeCtx} />
     </div>
   );
 }
