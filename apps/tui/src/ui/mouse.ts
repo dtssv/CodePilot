@@ -83,7 +83,9 @@ function x10Event(code: number, x: number, y: number): TermMouseEvent | undefine
 }
 
 // `g` flag: replace() walks every report in the chunk.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI ESC sequences
 const SGR_RE = /\u001b\[<(\d+);(\d+);(\d+)([Mm])/g;
+// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI ESC sequences
 const X10_RE = /\u001b\[M([\s\S]{3})/g;
 
 /**
