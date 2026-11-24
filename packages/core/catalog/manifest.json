@@ -1,12 +1,13 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-24",
+  "updatedAt": "2026-11-24",
   "catalogs": {
     "connectors": "connectors.json",
     "provider-templates": "provider-templates.json",
     "search-engines": "search-engines.json",
     "mcp-markets": "mcp-markets.json",
-    "plugins": "plugins.json"
+    "plugins": "plugins.json",
+    "model-reasoning": "model-reasoning.json"
   },
   "refresh": "once-per-calendar-day; keep local forever on failure"
 }

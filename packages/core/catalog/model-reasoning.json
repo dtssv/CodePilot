@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "updatedAt": "2026-11-24",
+  "refresh": "once-per-calendar-day; keep local forever on failure",
+  "doc": "Per-model reasoning-effort capability catalog. Each entry matches a model id glob and declares the levels that model exposes, its default, and the `wire` record describing how a level reaches the provider (verbatim effort field, thinking-token budget, or an on/off toggle). First matching entry wins, so put specific globs before generic ones. `levels` lists provider-native levels; the UI prepends `off` (= omit the knob, use the provider default). Empty `levels` marks a model with no controllable effort.",
+  "wires": {
+    "openai": {
+      "kind": "effort",
+      "field": "reasoning_effort"
+    },
+    "openai-responses": {
+      "kind": "effort",
+      "field": "reasoning.effort",
+      "summary": "auto"
+    },
+    "anthropic": {
+      "kind": "budget",
+      "field": "thinking.budget_tokens",
+      "min": 1024,
+      "answerHeadroom": 4096
+    },
+    "gemini": {
+      "kind": "budget",
+      "field": "generationConfig.thinkingConfig.thinkingBudget"
+    },
+    "toggle": {
+      "kind": "toggle",
+      "field": "thinking"
+    }
+  },
+  "models": [
+    {
+      "match": "gpt-5*-chat-latest",
+      "wire": "openai",
+      "levels": [],
+      "description": "Chat-latest exposes no reasoning knob"
+    },
+    {
+      "match": "gpt-5*pro*",
+      "wire": "openai",
+      "levels": ["medium", "high", "xhigh"],
+      "default": "high",
+      "description": "Pro models reason at medium or above"
+    },
+    {
+      "match": "gpt-5*codex*",
+      "wire": "openai-responses",
+      "levels": ["low", "medium", "high", "xhigh"],
+      "default": "medium"
+    },
+    {
+      "match": "gpt-5*mini",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    },
+    {
+      "match": "gpt-5*",
+      "wire": "openai",
+      "levels": ["minimal", "low", "medium", "high", "xhigh"],
+      "default": "medium"
+    },
+    {
+      "match": "gpt-6*",
+      "wire": "openai",
+      "levels": ["low", "medium", "high", "xhigh"],
+      "default": "medium"
+    },
+    {
+      "match": "o1*",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    },
+    {
+      "match": "o3*",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    },
+    {
+      "match": "o4*",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    },
+    {
+      "match": "claude-*haiku*",
+      "wire": "anthropic",
+      "levels": []
+    },
+    {
+      "match": "claude-opus-4*",
+      "wire": "anthropic",
+      "levels": ["low", "medium", "high"],
+      "default": "medium",
+      "budgets": { "low": 4096, "medium": 12000, "high": 32000 }
+    },
+    {
+      "match": "claude-sonnet-4*",
+      "wire": "anthropic",
+      "levels": ["low", "medium", "high"],
+      "default": "medium",
+      "budgets": { "low": 4096, "medium": 10000, "high": 24000 }
+    },
+    {
+      "match": "claude-*3*7*",
+      "wire": "anthropic",
+      "levels": ["low", "medium", "high"],
+      "default": "medium",
+      "budgets": { "low": 4096, "medium": 10000, "high": 20000 }
+    },
+    {
+      "match": "gemini-3*",
+      "wire": "gemini",
+      "levels": ["minimal", "low", "medium", "high"],
+      "default": "medium",
+      "budgets": { "minimal": 128, "low": 1024, "medium": 8192, "high": 24576 }
+    },
+    {
+      "match": "gemini-2.5*",
+      "wire": "gemini",
+      "levels": ["low", "medium", "high"],
+      "default": "medium",
+      "budgets": { "low": 1024, "medium": 8192, "high": 24576 }
+    },
+    {
+      "match": "deepseek-v*",
+      "wire": "openai",
+      "levels": ["high", "max"],
+      "default": "high"
+    },
+    {
+      "match": "deepseek-reasoner",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    },
+    {
+      "match": "glm-5*",
+      "wire": "openai",
+      "levels": ["high", "max"],
+      "default": "high"
+    },
+    {
+      "match": "glm-4*",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    },
+    {
+      "match": "kimi-k2*",
+      "wire": "toggle",
+      "levels": ["high"],
+      "default": "high",
+      "description": "Kimi K2 exposes a thinking toggle, not tiered effort"
+    },
+    {
+      "match": "kimi-k3*",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    },
+    {
+      "match": "minimax-m*",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    },
+    {
+      "match": "grok-[3-9]*",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    },
+    {
+      "match": "qwen[3-9]*",
+      "wire": "openai",
+      "levels": ["low", "medium", "high"],
+      "default": "medium"
+    }
+  ]
+}
